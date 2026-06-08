@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from html import escape
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from config import RATE_LIMIT, RATE_WINDOW, BROADCAST_DELAY
@@ -11,7 +11,7 @@ from database import (
     save_message, save_admin_reply,
     save_message_map, get_user_from_map,
     is_admin, get_all_admins, get_all_active_users,
-    add_admin, mark_blocked,
+    add_admin, mark_blocked, get_text, set_text, TEXT_LABELS,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,9 +30,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if is_admin(user.id):
-        # Admin user xabariga media javob yubormoqda
         if update.message.reply_to_message:
             await _forward_media_reply_to_user(update, context)
+        elif context.user_data.get("waiting_broadcast"):
+            # Admin media broadcast yubormoqda
+            await _do_broadcast(update, context)
         return
     await _handle_user_media(update, context)
 
@@ -46,10 +48,11 @@ async def _handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await _do_broadcast(update, context)
     elif context.user_data.get("waiting_admin_id"):
         await _do_add_admin(update, context)
+    elif context.user_data.get("waiting_text_edit"):
+        await _do_edit_text(update, context)
 
 
 async def _forward_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin reply qilgan matnni asl foydalanuvchiga yuboradi."""
     reply_msg_id = update.message.reply_to_message.message_id
     chat_id      = update.effective_chat.id
 
@@ -60,12 +63,10 @@ async def _forward_reply_to_user(update: Update, context: ContextTypes.DEFAULT_T
 
     try:
         await context.bot.send_message(user_id, f"📩 Javob:\n\n{update.message.text}")
-
         try:
             save_admin_reply(update.effective_user.id, user_id, update.message.text or "")
         except Exception as e:
             logger.error(f"save_admin_reply xatosi: {e}")
-
         await update.message.reply_text("✅ Javob yuborildi.")
     except Exception as e:
         if "Forbidden" in str(e):
@@ -76,7 +77,6 @@ async def _forward_reply_to_user(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def _forward_media_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin reply qilgan media ni asl foydalanuvchiga yuboradi."""
     reply_msg_id = update.message.reply_to_message.message_id
     chat_id      = update.effective_chat.id
 
@@ -91,12 +91,10 @@ async def _forward_media_reply_to_user(update: Update, context: ContextTypes.DEF
             from_chat_id=chat_id,
             message_id=update.message.message_id,
         )
-
         try:
             save_admin_reply(update.effective_user.id, user_id, "[media]")
         except Exception as e:
             logger.error(f"save_admin_reply xatosi: {e}")
-
         await update.message.reply_text("✅ Javob yuborildi.")
     except Exception as e:
         if "Forbidden" in str(e):
@@ -107,11 +105,13 @@ async def _forward_media_reply_to_user(update: Update, context: ContextTypes.DEF
 
 
 async def _do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Barcha aktiv foydalanuvchilarga xabar yuboradi."""
+    """Har qanday turdagi xabarni (matn, rasm, video, stiker...) broadcast qiladi."""
     context.user_data.pop("waiting_broadcast", None)
-    text  = update.message.text
-    users = get_all_active_users()
 
+    from_chat_id = update.effective_chat.id
+    msg_id       = update.message.message_id
+
+    users = get_all_active_users()
     if not users:
         await update.message.reply_text("📭 Aktiv foydalanuvchilar yo'q.")
         return
@@ -122,7 +122,12 @@ async def _do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     for i, uid in enumerate(users):
         try:
-            await context.bot.send_message(uid, text)
+            # copy_message — matn, rasm, video, stiker, gif — barchasi ishlaydi
+            await context.bot.copy_message(
+                chat_id=uid,
+                from_chat_id=from_chat_id,
+                message_id=msg_id,
+            )
             sent += 1
         except Exception as e:
             failed += 1
@@ -145,7 +150,6 @@ async def _do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def _do_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Yangi admin qo'shadi."""
     context.user_data.pop("waiting_admin_id", None)
     try:
         new_id = int(update.message.text.strip())
@@ -158,17 +162,41 @@ async def _do_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("❌ Noto'g'ri format. Faqat raqam kiriting.")
 
 
+async def _do_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin yuborgan yangi matnni DB ga saqlaydi."""
+    key   = context.user_data.pop("waiting_text_edit")
+    value = update.message.text
+    if not value:
+        await update.message.reply_text("❌ Faqat matn qabul qilinadi.")
+        context.user_data["waiting_text_edit"] = key
+        return
+    set_text(key, value)
+    label = TEXT_LABELS.get(key, key)
+    await update.message.reply_text(
+        f"✅ <b>{label}</b> yangilandi!",
+        parse_mode="HTML",
+    )
+
+
 # ─── Foydalanuvchi matn xabari ────────────────────────────────────────────────
 
 async def _handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     text = update.message.text
 
+    # Foydalanuvchini ro'yxatga olish yoki yangilash
     try:
-        get_or_create_user(user.id, user.first_name, user.username)
+        db_user = get_or_create_user(user.id, user.first_name, user.username)
     except Exception as e:
         logger.error(f"get_or_create_user xatosi (user={user.id}): {e}")
+        db_user = None
 
+    # Bloklangan tekshirish
+    if db_user and db_user.get("is_blocked"):
+        await update.message.reply_text(get_text("blocked"))
+        return
+
+    # Rate limit
     try:
         allowed = _check_and_update_rate_limit(user.id, context)
     except Exception as e:
@@ -176,10 +204,7 @@ async def _handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYP
         allowed = True
 
     if not allowed:
-        await update.message.reply_text(
-            "⚠️ Siz vaqtinchalik xabar yuborish chekloviga yetdingiz.\n"
-            "Iltimos, 1 soatdan so'ng qayta yuboring."
-        )
+        await update.message.reply_text(get_text("rate_limit"))
         return
 
     try:
@@ -187,12 +212,11 @@ async def _handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"save_message xatosi: {e}")
 
-    safe_name = escape(user.first_name or "")
-    uname     = f"@{user.username}" if user.username else "—"
+    safe_name  = escape(user.first_name or "")
+    uname      = f"@{user.username}" if user.username else "—"
     safe_uname = escape(uname)
     safe_text  = escape(text)
 
-    # ✅ HTML parse_mode bilan to'g'ri format
     admin_text = (
         f"👤 <b>{safe_name}</b>\n"
         f"🆔 <code>{user.id}</code> · {safe_uname}\n"
@@ -200,12 +224,18 @@ async def _handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYP
         f"💬 {safe_text}"
     )
 
+    # Blokla tugmasi (faqat admin ko'radi)
+    block_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚫 Blokla", callback_data=f"block_{user.id}")]
+    ])
+
     for admin_id in get_all_admins():
         try:
             sent = await context.bot.send_message(
                 admin_id,
                 admin_text,
                 parse_mode="HTML",
+                reply_markup=block_keyboard,
             )
             try:
                 save_message_map(sent.message_id, admin_id, user.id)
@@ -214,9 +244,7 @@ async def _handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.error(f"Admin {admin_id} ga yuborishda xato: {e}")
 
-    await update.message.reply_text(
-        "✅ Xabaringiz yetkazildi, tez orada javob beriladi 🙂"
-    )
+    await update.message.reply_text(get_text("message_sent"))
 
 
 # ─── Foydalanuvchi media xabari ───────────────────────────────────────────────
@@ -225,35 +253,31 @@ async def _handle_user_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user = update.effective_user
     msg  = update.message
 
-    if msg.photo:
-        media_type = "📷 Rasm"
-    elif msg.video:
-        media_type = "🎥 Video"
-    elif msg.audio:
-        media_type = "🎵 Audio"
-    elif msg.voice:
-        media_type = "🎙 Ovozli xabar"
-    elif msg.sticker:
-        media_type = "🎭 Stiker"
-    elif msg.animation:
-        media_type = "🎞 GIF"
-    elif msg.video_note:
-        media_type = "⭕ Video xabar"
-    elif msg.document:
-        media_type = "📎 Fayl"
-    else:
-        media_type = "📎 Media"
-
     try:
-        get_or_create_user(user.id, user.first_name, user.username)
+        db_user = get_or_create_user(user.id, user.first_name, user.username)
     except Exception as e:
         logger.error(f"get_or_create_user xatosi: {e}")
+        db_user = None
+
+    # Bloklangan tekshirish
+    if db_user and db_user.get("is_blocked"):
+        await update.message.reply_text(get_text("blocked"))
+        return
+
+    if msg.photo:        media_type = "📷 Rasm"
+    elif msg.video:      media_type = "🎥 Video"
+    elif msg.audio:      media_type = "🎵 Audio"
+    elif msg.voice:      media_type = "🎙 Ovozli xabar"
+    elif msg.sticker:    media_type = "🎭 Stiker"
+    elif msg.animation:  media_type = "🎞 GIF"
+    elif msg.video_note: media_type = "⭕ Video xabar"
+    elif msg.document:   media_type = "📎 Fayl"
+    else:                media_type = "📎 Media"
 
     safe_name  = escape(user.first_name or "")
     uname      = f"@{user.username}" if user.username else "—"
     safe_uname = escape(uname)
 
-    # Header — kim yubordi + media turi
     header = (
         f"👤 <b>{safe_name}</b>\n"
         f"🆔 <code>{user.id}</code> · {safe_uname}\n"
@@ -261,12 +285,20 @@ async def _handle_user_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"{media_type}"
     )
 
+    # Blokla tugmasi headerda
+    block_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚫 Blokla", callback_data=f"block_{user.id}")]
+    ])
+
     for admin_id in get_all_admins():
         try:
-            # 1. Kim yubordi — matn header
-            await context.bot.send_message(admin_id, header, parse_mode="HTML")
-
-            # 2. Medianing o'zi — copy_message qaytaradigan ID ni message_map ga saqlaymiz
+            # Header (blokla tugmasi bilan)
+            await context.bot.send_message(
+                admin_id, header,
+                parse_mode="HTML",
+                reply_markup=block_keyboard,
+            )
+            # Media o'zi (reply uchun map shu IDga)
             copied = await context.bot.copy_message(
                 chat_id=admin_id,
                 from_chat_id=msg.chat_id,
@@ -276,19 +308,15 @@ async def _handle_user_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 save_message_map(copied.message_id, admin_id, user.id)
             except Exception as e:
                 logger.error(f"save_message_map xatosi: {e}")
-
         except Exception as e:
             logger.error(f"Admin {admin_id} ga yuborishda xato: {e}")
 
-    await update.message.reply_text(
-        "✅ Xabaringiz yetkazildi, tez orada javob beriladi 🙂"
-    )
+    await update.message.reply_text(get_text("message_sent"))
 
 
 # ─── Rate limit ───────────────────────────────────────────────────────────────
 
 def _check_and_update_rate_limit(user_id: int, context) -> bool:
-    """True = ruxsat. False = limit to'lgan."""
     db_user = get_user(user_id)
     if not db_user:
         return True
@@ -326,13 +354,11 @@ def _schedule_reset_notification(context, user_id: int, reset_at: datetime) -> N
     scheduler = context.bot_data.get("scheduler")
     if not scheduler:
         return
-
     job_id = f"rate_reset_{user_id}"
     try:
         scheduler.remove_job(job_id)
     except Exception:
         pass
-
     scheduler.add_job(
         _send_reset_notification,
         "date",
@@ -344,6 +370,6 @@ def _schedule_reset_notification(context, user_id: int, reset_at: datetime) -> N
 
 async def _send_reset_notification(bot, user_id: int) -> None:
     try:
-        await bot.send_message(user_id, "✅ Endi yana yozishingiz mumkin!")
+        await bot.send_message(user_id, get_text("rate_reset"))
     except Exception:
         pass
