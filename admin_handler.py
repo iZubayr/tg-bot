@@ -15,14 +15,17 @@ from database import (
 
 # ─── Klaviaturalar ────────────────────────────────────────────────────────────
 
-def _main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def _main_menu_keyboard(caller_id: int) -> InlineKeyboardMarkup:
+    buttons = [
         [InlineKeyboardButton("📊 Statistika", callback_data="stats")],
         [InlineKeyboardButton("📢 Broadcast",  callback_data="broadcast")],
-        [InlineKeyboardButton("👥 Adminlar",   callback_data="admins")],
-        [InlineKeyboardButton("📝 Matnlar",    callback_data="texts")],
-        [InlineKeyboardButton("🚫 Bloklangan", callback_data="blk_list")],
-    ])
+    ]
+    # Adminlar bo'limi faqat egaga ko'rinadi
+    if caller_id == MAIN_ADMIN_ID:
+        buttons.append([InlineKeyboardButton("👥 Adminlar", callback_data="admins")])
+    buttons.append([InlineKeyboardButton("📝 Matnlar",    callback_data="texts")])
+    buttons.append([InlineKeyboardButton("🚫 Bloklangan", callback_data="blk_list")])
+    return InlineKeyboardMarkup(buttons)
 
 
 def _admins_keyboard() -> InlineKeyboardMarkup:
@@ -69,7 +72,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await update.message.reply_text(
         "🛠 <b>Admin panel</b>\n\nQuyidagi bo'limlardan birini tanlang:",
-        reply_markup=_main_menu_keyboard(),
+        reply_markup=_main_menu_keyboard(update.effective_user.id),
         parse_mode="HTML",
     )
 
@@ -93,7 +96,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data.pop("waiting_text_edit", None)
         await _safe_edit(query,
             "🛠 <b>Admin panel</b>\n\nQuyidagi bo'limlardan birini tanlang:",
-            _main_menu_keyboard(),
+            _main_menu_keyboard(query.from_user.id),
         )
 
     # ── Statistika ───────────────────────────────────────────────────────────
@@ -130,8 +133,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             keyboard,
         )
 
-    # ── Adminlar ro'yxati ────────────────────────────────────────────────────
+    # ── Adminlar ro'yxati (faqat ega) ────────────────────────────────────────
     elif data == "admins":
+        if query.from_user.id != MAIN_ADMIN_ID:
+            await query.answer("❌ Bu bo'lim faqat bot egasi uchun!", show_alert=True)
+            return
         context.user_data.pop("waiting_admin_id", None)
         await _safe_edit(query,
             "👥 <b>Adminlar ro'yxati</b>\n\nAdmin tanlang yoki yangi qo'shing:",
@@ -139,6 +145,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
     elif data == "adm_add":
+        if query.from_user.id != MAIN_ADMIN_ID:
+            await query.answer("❌ Bu bo'lim faqat bot egasi uchun!", show_alert=True)
+            return
         context.user_data["waiting_admin_id"] = True
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔙 Orqaga", callback_data="admins")],
@@ -177,6 +186,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _safe_edit(query, text, InlineKeyboardMarkup(buttons))
 
     elif data.startswith("adm_del_"):
+        if query.from_user.id != MAIN_ADMIN_ID:
+            await query.answer("❌ Bu bo'lim faqat bot egasi uchun!", show_alert=True)
+            return
         admin_id = int(data.split("_", 2)[2])
         if admin_id == MAIN_ADMIN_ID:
             await query.answer("❌ Asosiy adminni o'chirib bo'lmaydi!", show_alert=True)
