@@ -1,3 +1,5 @@
+import io
+import logging
 from datetime import datetime
 from html import escape
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -6,222 +8,411 @@ from telegram.ext import ContextTypes
 
 from config import MAIN_ADMIN_ID
 from database import (
-    get_stats, is_admin, get_all_admins,
-    get_admin_added_at, remove_admin, get_user,
-    mark_blocked, unblock_user, get_blocked_users,
-    get_text, set_text, TEXT_LABELS, get_all_texts,
+    get_stats, is_admin, get_all_admins, get_admin_added_at,
+    remove_admin, add_admin, get_user, mark_blocked, unblock_user,
+    unblock_all, get_blocked_users, set_vip, get_vip_users,
+    get_text, set_text, TEXT_LABELS,
+    get_setting, set_setting,
+    get_pending_messages, get_pending_broadcasts, delete_scheduled_broadcast,
+    get_user_message_count, get_user_growth, update_message_status,
 )
+
+logger = logging.getLogger(__name__)
+
+
+# ─── Holat tozalash ───────────────────────────────────────────────────────────
+
+def _clear(context) -> None:
+    for k in [
+        "waiting_broadcast", "waiting_admin_id", "waiting_text_edit",
+        "replying_to", "waiting_user_search", "waiting_vip_add",
+        "waiting_channel_id", "waiting_pinned_text", "waiting_bc_message",
+        "waiting_bc_time", "bc_message_data", "waiting_remind_interval",
+    ]:
+        context.user_data.pop(k, None)
 
 
 # ─── Klaviaturalar ────────────────────────────────────────────────────────────
 
-def _main_menu_keyboard(caller_id: int) -> InlineKeyboardMarkup:
-    buttons = [
-        [InlineKeyboardButton("📊 Statistika", callback_data="stats")],
-        [InlineKeyboardButton("📢 Broadcast",  callback_data="broadcast")],
+def _main_kb(caller_id: int) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton("📊 Statistika", callback_data="stats"),
+            InlineKeyboardButton("📢 Broadcast",  callback_data="bc_menu"),
+        ],
+        [
+            InlineKeyboardButton("📬 Xabarlar",         callback_data="msgs"),
+            InlineKeyboardButton("👥 Foydalanuvchilar",  callback_data="users"),
+        ],
+        [InlineKeyboardButton("⚙️ Sozlamalar", callback_data="settings")],
     ]
-    # Adminlar bo'limi faqat egaga ko'rinadi
     if caller_id == MAIN_ADMIN_ID:
-        buttons.append([InlineKeyboardButton("👥 Adminlar", callback_data="admins")])
-    buttons.append([InlineKeyboardButton("📝 Matnlar",    callback_data="texts")])
-    buttons.append([InlineKeyboardButton("🚫 Bloklangan", callback_data="blk_list")])
-    return InlineKeyboardMarkup(buttons)
+        rows.append([InlineKeyboardButton("👑 Adminlar", callback_data="admins")])
+    return InlineKeyboardMarkup(rows)
 
 
-def _admins_keyboard() -> InlineKeyboardMarkup:
-    buttons = []
-    for admin_id in get_all_admins():
-        user_info = get_user(admin_id)
-        name = escape(user_info["first_name"]) if user_info else str(admin_id)
-        is_main = (admin_id == MAIN_ADMIN_ID)
-        label = f"👑 {name}" if is_main else f"👤 {name}"
-        buttons.append([InlineKeyboardButton(label, callback_data=f"adm_info_{admin_id}")])
-    buttons.append([InlineKeyboardButton("➕ Admin qo'shish", callback_data="adm_add")])
-    buttons.append([InlineKeyboardButton("🔙 Orqaga",         callback_data="back")])
-    return InlineKeyboardMarkup(buttons)
+def _back(to: str = "back") -> list:
+    return [InlineKeyboardButton("🔙 Orqaga", callback_data=to)]
 
 
-def _texts_keyboard() -> InlineKeyboardMarkup:
-    buttons = []
-    for key, label in TEXT_LABELS.items():
-        buttons.append([InlineKeyboardButton(label, callback_data=f"txt_{key}")])
-    buttons.append([InlineKeyboardButton("🔙 Orqaga", callback_data="back")])
-    return InlineKeyboardMarkup(buttons)
-
-
-def _blocked_list_keyboard(users: list[dict]) -> InlineKeyboardMarkup:
-    buttons = []
-    for u in users[:20]:
-        name  = escape(u.get("first_name", "—"))
-        uid   = u["user_id"]
-        uname = f" @{u['username']}" if u.get("username") else ""
-        buttons.append([InlineKeyboardButton(f"👤 {name}{uname}", callback_data=f"blk_info_{uid}")])
-    buttons.append([InlineKeyboardButton("🔙 Orqaga", callback_data="back")])
-    return InlineKeyboardMarkup(buttons)
-
-
-# ─── /admin buyrug'i ──────────────────────────────────────────────────────────
+# ─── /admin va panel tugmasi ──────────────────────────────────────────────────
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
-
-    context.user_data.pop("waiting_broadcast",  None)
-    context.user_data.pop("waiting_admin_id",   None)
-    context.user_data.pop("waiting_text_edit",  None)
-
+    _clear(context)
     await update.message.reply_text(
-        "🛠 <b>Admin panel</b>\n\nQuyidagi bo'limlardan birini tanlang:",
-        reply_markup=_main_menu_keyboard(update.effective_user.id),
+        "🛠 <b>Admin panel</b>",
+        reply_markup=_main_kb(update.effective_user.id),
         parse_mode="HTML",
     )
 
 
 # ─── Callback handler ─────────────────────────────────────────────────────────
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-
     if not is_admin(query.from_user.id):
         await query.answer("❌ Ruxsat yo'q!", show_alert=True)
         return
-
     await query.answer()
     data = query.data
+    uid  = query.from_user.id
 
-    # ── Orqaga ──────────────────────────────────────────────────────────────
-    if data == "back":
-        context.user_data.pop("waiting_broadcast", None)
-        context.user_data.pop("waiting_admin_id",  None)
-        context.user_data.pop("waiting_text_edit", None)
-        await _safe_edit(query,
-            "🛠 <b>Admin panel</b>\n\nQuyidagi bo'limlardan birini tanlang:",
-            _main_menu_keyboard(query.from_user.id),
-        )
+    # ── noop ─────────────────────────────────────────────────────────────────
+    if data == "noop":
+        return
 
-    # ── Statistika ───────────────────────────────────────────────────────────
+    # ── Asosiy menu ──────────────────────────────────────────────────────────
+    elif data == "back":
+        _clear(context)
+        await _edit(query, "🛠 <b>Admin panel</b>", _main_kb(uid))
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STATISTIKA
+    # ══════════════════════════════════════════════════════════════════════════
     elif data == "stats":
-        stats = get_stats()
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Yangilash", callback_data="stats")],
-            [InlineKeyboardButton("🔙 Orqaga",    callback_data="back")],
+        s = get_stats()
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔄 Yangilash",    callback_data="stats"),
+                InlineKeyboardButton("📈 Grafik",       callback_data="stat_graph"),
+            ],
+            _back(),
         ])
         text = (
             f"📊 <b>Statistika</b>\n\n"
-            f"👥 Jami foydalanuvchilar: <b>{stats['total']}</b>\n"
-            f"🆕 Bugun yangi:           <b>{stats['today']}</b>\n"
-            f"🚫 Botni bloklagan:       <b>{stats['blocked']}</b>"
+            f"👥 Jami:      <b>{s['total']}</b>\n"
+            f"🆕 Bugun:     <b>{s['today']}</b>\n"
+            f"⭐ VIP:       <b>{s['vip']}</b>\n"
+            f"🚫 Bloklangan: <b>{s['blocked']}</b>"
         )
         try:
-            await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+            await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
         except BadRequest as e:
-            if "Message is not modified" in str(e):
-                await query.answer("✅ Ma'lumotlar allaqachon yangi!", show_alert=False)
+            if "not modified" in str(e).lower():
+                await query.answer("✅ Allaqachon yangi!", show_alert=False)
             else:
                 raise
 
-    # ── Broadcast ────────────────────────────────────────────────────────────
-    elif data == "broadcast":
+    elif data == "stat_graph":
+        await _send_graph(query, context)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # BROADCAST
+    # ══════════════════════════════════════════════════════════════════════════
+    elif data == "bc_menu":
+        _clear(context)
+        bcs  = get_pending_broadcasts()
+        bc_n = f" ({len(bcs)} ta)" if bcs else ""
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📤 Hozir",          callback_data="bc_now"),
+                InlineKeyboardButton("⏰ Jadval",          callback_data="bc_sched"),
+            ],
+            [InlineKeyboardButton(f"📋 Jadval ro'yxati{bc_n}", callback_data="bc_list")],
+            _back(),
+        ])
+        await _edit(query, "📢 <b>Broadcast</b>\n\nQanday yubormoqchisiz?", kb)
+
+    elif data == "bc_now":
+        _clear(context)
         context.user_data["waiting_broadcast"] = True
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Orqaga", callback_data="back")],
-        ])
-        await _safe_edit(query,
-            "📢 <b>Broadcast</b>\n\n"
-            "Barcha foydalanuvchilarga yuboriladigan xabarni yuboring.\n"
-            "<i>Matn, rasm, video, stiker, GIF — barchasi qabul qilinadi.</i>",
-            keyboard,
+        await _edit(query,
+            "📤 <b>Broadcast — Hozir</b>\n\nXabarni yuboring (matn, rasm, video, stiker...):",
+            InlineKeyboardMarkup([_back("bc_menu")]),
         )
 
-    # ── Adminlar ro'yxati (faqat ega) ────────────────────────────────────────
-    elif data == "admins":
-        if query.from_user.id != MAIN_ADMIN_ID:
-            await query.answer("❌ Bu bo'lim faqat bot egasi uchun!", show_alert=True)
+    elif data == "bc_sched":
+        _clear(context)
+        context.user_data["waiting_bc_message"] = True
+        await _edit(query,
+            "⏰ <b>Jadval broadcast</b>\n\nAvval broadcast xabarini yuboring:",
+            InlineKeyboardMarkup([_back("bc_menu")]),
+        )
+
+    elif data == "bc_list":
+        bcs = get_pending_broadcasts()
+        if not bcs:
+            await _edit(query, "📋 <b>Jadval ro'yxati</b>\n\nJadvalda xabar yo'q.",
+                        InlineKeyboardMarkup([_back("bc_menu")]))
             return
-        context.user_data.pop("waiting_admin_id", None)
-        await _safe_edit(query,
-            "👥 <b>Adminlar ro'yxati</b>\n\nAdmin tanlang yoki yangi qo'shing:",
-            _admins_keyboard(),
-        )
-
-    elif data == "adm_add":
-        if query.from_user.id != MAIN_ADMIN_ID:
-            await query.answer("❌ Bu bo'lim faqat bot egasi uchun!", show_alert=True)
-            return
-        context.user_data["waiting_admin_id"] = True
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Orqaga", callback_data="admins")],
-        ])
-        await _safe_edit(query,
-            "👤 <b>Admin qo'shish</b>\n\n"
-            "Yangi adminning Telegram ID sini yuboring.\n"
-            "<i>ID ni bilish uchun: @userinfobot</i>",
-            keyboard,
-        )
-
-    elif data.startswith("adm_info_"):
-        admin_id = int(data.split("_", 2)[2])
-        is_main  = (admin_id == MAIN_ADMIN_ID)
-
-        user_info = get_user(admin_id)
-        name = escape(user_info["first_name"]) if user_info else "—"
-
-        added_str = "—"
-        if not is_main:
-            raw = get_admin_added_at(admin_id)
-            if raw:
-                try:
-                    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                    added_str = dt.strftime("%d.%m.%Y")
-                except Exception:
-                    added_str = raw[:10]
-
-        text = f"👤 <b>{name}</b>\n\n🆔 <code>{admin_id}</code>\n"
-        text += "👑 Asosiy admin\n" if is_main else f"📅 Qo'shilgan: {added_str}\n"
-
+        import pytz
+        tz = pytz.timezone("Asia/Tashkent")
         buttons = []
-        if not is_main:
-            buttons.append([InlineKeyboardButton("🗑 O'chirish", callback_data=f"adm_del_{admin_id}")])
-        buttons.append([InlineKeyboardButton("🔙 Orqaga", callback_data="admins")])
-        await _safe_edit(query, text, InlineKeyboardMarkup(buttons))
+        for bc in bcs[:10]:
+            try:
+                dt  = datetime.fromisoformat(bc["scheduled_at"]).astimezone(tz)
+                lbl = dt.strftime("%d.%m %H:%M")
+            except Exception:
+                lbl = bc["scheduled_at"][:16]
+            buttons.append([InlineKeyboardButton(
+                f"🗓 {lbl} — ❌", callback_data=f"bc_del_{bc['id']}"
+            )])
+        buttons.append(_back("bc_menu"))
+        await _edit(query, f"📋 <b>Jadval ro'yxati</b> ({len(bcs)} ta)\n\nO'chirish uchun bosing:",
+                    InlineKeyboardMarkup(buttons))
 
-    elif data.startswith("adm_del_"):
-        if query.from_user.id != MAIN_ADMIN_ID:
-            await query.answer("❌ Bu bo'lim faqat bot egasi uchun!", show_alert=True)
-            return
-        admin_id = int(data.split("_", 2)[2])
-        if admin_id == MAIN_ADMIN_ID:
-            await query.answer("❌ Asosiy adminni o'chirib bo'lmaydi!", show_alert=True)
-            return
-        remove_admin(admin_id)
-        await query.answer("✅ Admin o'chirildi!", show_alert=True)
-        await _safe_edit(query,
-            "👥 <b>Adminlar ro'yxati</b>\n\nAdmin tanlang yoki yangi qo'shing:",
-            _admins_keyboard(),
-        )
+    elif data.startswith("bc_del_"):
+        bc_id = int(data.split("_", 2)[2])
+        delete_scheduled_broadcast(bc_id)
+        scheduler = context.bot_data.get("scheduler")
+        if scheduler:
+            try:
+                scheduler.remove_job(f"bc_{bc_id}")
+            except Exception:
+                pass
+        await query.answer("✅ Jadvaldan o'chirildi!", show_alert=True)
+        bcs = get_pending_broadcasts()
+        if not bcs:
+            await _edit(query, "📋 <b>Jadval ro'yxati</b>\n\nJadvalda xabar yo'q.",
+                        InlineKeyboardMarkup([_back("bc_menu")]))
+        else:
+            # refresh list
+            import pytz; tz = pytz.timezone("Asia/Tashkent")
+            buttons = []
+            for bc in bcs[:10]:
+                try:
+                    dt = datetime.fromisoformat(bc["scheduled_at"]).astimezone(tz)
+                    lbl = dt.strftime("%d.%m %H:%M")
+                except Exception:
+                    lbl = bc["scheduled_at"][:16]
+                buttons.append([InlineKeyboardButton(f"🗓 {lbl} — ❌", callback_data=f"bc_del_{bc['id']}")])
+            buttons.append(_back("bc_menu"))
+            await _edit(query, f"📋 <b>Jadval ro'yxati</b> ({len(bcs)} ta):",
+                        InlineKeyboardMarkup(buttons))
 
-    # ── Matnlar bo'limi ──────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # XABARLAR
+    # ══════════════════════════════════════════════════════════════════════════
+    elif data == "msgs":
+        _clear(context)
+        pending = get_pending_messages(uid)
+        rem_on  = get_setting("reminder_enabled") == "true"
+        rem_h   = get_setting("reminder_interval") or "2"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                f"📨 Javobsizlar ({len(pending)} ta)", callback_data="msgs_pending"
+            )],
+            [InlineKeyboardButton(
+                f"{'🟢' if rem_on else '🔴'} Eslatma (har {rem_h}h)",
+                callback_data="msgs_remind"
+            )],
+            _back(),
+        ])
+        await _edit(query, "📬 <b>Xabarlar</b>", kb)
+
+    elif data == "msgs_pending":
+        rows = get_pending_messages(uid)
+        if not rows:
+            await _edit(query, "📨 <b>Javobsiz xabarlar</b>\n\nBarcha xabarlarga javob berilgan ✅",
+                        InlineKeyboardMarkup([_back("msgs")]))
+            return
+        buttons = []
+        for row in rows[:10]:
+            u    = get_user(row["user_id"])
+            name = escape(u["first_name"]) if u else str(row["user_id"])
+            prev = (row.get("message_preview") or "")[:30]
+            lbl  = f"👤 {name}: {prev}" if prev else f"👤 {name}"
+            buttons.append([InlineKeyboardButton(lbl, callback_data=f"usr_prof_{row['user_id']}")])
+        buttons.append(_back("msgs"))
+        await _edit(query, f"📨 <b>Javobsiz xabarlar</b> ({len(rows)} ta):",
+                    InlineKeyboardMarkup(buttons))
+
+    elif data == "msgs_remind":
+        rem_on = get_setting("reminder_enabled") == "true"
+        rem_h  = get_setting("reminder_interval") or "2"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "🔴 O'chirish" if rem_on else "🟢 Yoqish",
+                callback_data="remind_tog"
+            )],
+            [InlineKeyboardButton("✏️ Intervalini o'zgartirish", callback_data="remind_set")],
+            _back("msgs"),
+        ])
+        state = "🟢 Yoqiq" if rem_on else "🔴 O'chiq"
+        await _edit(query,
+            f"⏰ <b>Eslatma sozlamalari</b>\n\nHolat: {state}\nInterval: har {rem_h} soatda",
+            kb)
+
+    elif data == "remind_tog":
+        cur = get_setting("reminder_enabled") == "true"
+        set_setting("reminder_enabled", "false" if cur else "true")
+        from message_handler import _reschedule_reminder
+        _reschedule_reminder(context)
+        await query.answer("✅ O'zgartirildi!", show_alert=False)
+        # refresh
+        rem_on = get_setting("reminder_enabled") == "true"
+        rem_h  = get_setting("reminder_interval") or "2"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔴 O'chirish" if rem_on else "🟢 Yoqish", callback_data="remind_tog")],
+            [InlineKeyboardButton("✏️ Intervalini o'zgartirish", callback_data="remind_set")],
+            _back("msgs"),
+        ])
+        state = "🟢 Yoqiq" if rem_on else "🔴 O'chiq"
+        await _edit(query, f"⏰ <b>Eslatma</b>\n\nHolat: {state}\nInterval: har {rem_h}h", kb)
+
+    elif data == "remind_set":
+        context.user_data["waiting_remind_interval"] = True
+        await _edit(query,
+            "✏️ <b>Eslatma intervali</b>\n\nNecha soatda bir yuborilsin? (1–24):",
+            InlineKeyboardMarkup([_back("msgs_remind")]))
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # FOYDALANUVCHILAR
+    # ══════════════════════════════════════════════════════════════════════════
+    elif data == "users":
+        _clear(context)
+        blk = len(get_blocked_users())
+        vip = len(get_vip_users())
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔍 Qidiruv",            callback_data="users_search")],
+            [
+                InlineKeyboardButton(f"⭐ VIP ({vip} ta)",      callback_data="users_vip"),
+                InlineKeyboardButton(f"🚫 Bloklangan ({blk} ta)", callback_data="blk_list"),
+            ],
+            _back(),
+        ])
+        await _edit(query, "👥 <b>Foydalanuvchilar</b>", kb)
+
+    elif data == "users_search":
+        _clear(context)
+        context.user_data["waiting_user_search"] = True
+        await _edit(query,
+            "🔍 <b>Qidiruv</b>\n\nUser ID (raqam) yoki ism yuboring:",
+            InlineKeyboardMarkup([_back("users")]))
+
+    elif data == "users_vip":
+        vips = get_vip_users()
+        if not vips:
+            await _edit(query, "⭐ <b>VIP foydalanuvchilar</b>\n\nVIP ro'yxati bo'sh.",
+                        InlineKeyboardMarkup([
+                            [InlineKeyboardButton("➕ VIP qo'shish", callback_data="vip_add")],
+                            _back("users"),
+                        ]))
+            return
+        buttons = []
+        for u in vips[:15]:
+            name = escape(u.get("first_name", "—"))
+            buttons.append([InlineKeyboardButton(
+                f"⭐ {name} ({u['user_id']})", callback_data=f"usr_prof_{u['user_id']}"
+            )])
+        buttons.append([InlineKeyboardButton("➕ VIP qo'shish", callback_data="vip_add")])
+        buttons.append(_back("users"))
+        await _edit(query, f"⭐ <b>VIP foydalanuvchilar</b> ({len(vips)} ta):",
+                    InlineKeyboardMarkup(buttons))
+
+    elif data == "vip_add":
+        _clear(context)
+        context.user_data["waiting_vip_add"] = True
+        await _edit(query,
+            "⭐ <b>VIP qo'shish</b>\n\nUser ID ni yuboring:",
+            InlineKeyboardMarkup([_back("users_vip")]))
+
+    elif data.startswith("usr_prof_"):
+        await _show_user_profile(query, context, int(data.split("_", 2)[2]))
+
+    elif data == "blk_list":
+        blk_users = get_blocked_users()
+        if not blk_users:
+            await _edit(query, "🚫 <b>Bloklangan</b>\n\nHech kim bloklangani yo'q.",
+                        InlineKeyboardMarkup([_back("users")]))
+            return
+        buttons = []
+        for u in blk_users[:15]:
+            name  = escape(u.get("first_name", "—"))
+            uname = f" @{u['username']}" if u.get("username") else ""
+            buttons.append([InlineKeyboardButton(
+                f"👤 {name}{uname}", callback_data=f"usr_prof_{u['user_id']}"
+            )])
+        buttons.append([InlineKeyboardButton("🔓 Ommaviy blok ochish", callback_data="blk_all")])
+        buttons.append(_back("users"))
+        await _edit(query, f"🚫 <b>Bloklangan</b> ({len(blk_users)} ta):",
+                    InlineKeyboardMarkup(buttons))
+
+    elif data == "blk_all":
+        await _edit(query,
+            f"🔓 <b>Ommaviy blok ochish</b>\n\nBarcha bloklangan foydalanuvchilardan blok olib tashlanadi. Tasdiqlaysizmi?",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Ha, hammani ochish", callback_data="blk_all_ok")],
+                [InlineKeyboardButton("🔙 Bekor qilish",       callback_data="blk_list")],
+            ]))
+
+    elif data == "blk_all_ok":
+        count = unblock_all()
+        await query.answer(f"✅ {count} ta foydalanuvchi blokdan chiqarildi!", show_alert=True)
+        await _edit(query, "🚫 <b>Bloklangan</b>\n\nHech kim bloklangani yo'q.",
+                    InlineKeyboardMarkup([_back("users")]))
+
+    elif data.startswith("blk_info_"):
+        await _show_user_profile(query, context, int(data.split("_", 2)[2]))
+
+    elif data.startswith("unblk_"):
+        user_id = int(data.split("_", 1)[1])
+        unblock_user(user_id)
+        await query.answer("✅ Blok olib tashlandi!", show_alert=True)
+        await _show_user_profile(query, context, user_id)
+
+    elif data.startswith("vip_del_"):
+        user_id = int(data.split("_", 2)[2])
+        set_vip(user_id, False)
+        await query.answer("✅ VIP olib tashlandi!", show_alert=True)
+        await _show_user_profile(query, context, user_id)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SOZLAMALAR
+    # ══════════════════════════════════════════════════════════════════════════
+    elif data == "settings":
+        _clear(context)
+        chan_on = get_setting("channel_check_enabled") == "true"
+        pin_on  = get_setting("pinned_enabled")        == "true"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 Matnlar",   callback_data="texts")],
+            [InlineKeyboardButton("📌 Pinlangan xabar", callback_data="set_pin")],
+            [InlineKeyboardButton(
+                f"{'🟢' if chan_on else '🔴'} Kanal obuna",
+                callback_data="set_chan"
+            )],
+            _back(),
+        ])
+        await _edit(query, "⚙️ <b>Sozlamalar</b>", kb)
+
     elif data == "texts":
-        context.user_data.pop("waiting_text_edit", None)
-        await _safe_edit(query,
-            "📝 <b>Bot matnlari</b>\n\nO'zgartirish uchun matn turini tanlang:",
-            _texts_keyboard(),
-        )
+        _clear(context)
+        buttons = [[InlineKeyboardButton(label, callback_data=f"txt_{key}")]
+                   for key, label in TEXT_LABELS.items()]
+        buttons.append(_back("settings"))
+        await _edit(query, "📝 <b>Bot matnlari</b>\n\nO'zgartirish uchun tanlang:",
+                    InlineKeyboardMarkup(buttons))
 
     elif data.startswith("txt_edit_"):
-        # txt_edit_ ni txt_ dan OLDIN tekshirish kerak
         key = data.split("_", 2)[2]
         context.user_data["waiting_text_edit"] = key
         label = TEXT_LABELS.get(key, key)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Bekor qilish", callback_data=f"txt_{key}")],
-        ])
-        await _safe_edit(query,
-            f"📝 <b>{label}</b>\n\n"
-            f"Yangi matnni yuboring:\n"
-            f"<i>HTML teglari ishlatsa bo'ladi: &lt;b&gt;, &lt;i&gt;, &lt;a href='...'&gt;</i>",
-            keyboard,
-        )
+        await _edit(query,
+            f"📝 <b>{label}</b>\n\nYangi matnni yuboring:\n"
+            f"<i>HTML teglari: &lt;b&gt;, &lt;i&gt;, &lt;a href='...'&gt;</i>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Bekor qilish", callback_data=f"txt_{key}")]]))
 
     elif data.startswith("txt_"):
         key = data.split("_", 1)[1]
@@ -229,85 +420,303 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         label   = TEXT_LABELS.get(key, key)
         current = get_text(key)
         display = escape(current[:300] + ("..." if len(current) > 300 else ""))
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✏️ O'zgartirish", callback_data=f"txt_edit_{key}")],
-            [InlineKeyboardButton("🔙 Orqaga",        callback_data="texts")],
+        await _edit(query,
+            f"📝 <b>{label}</b>\n\n📌 Hozirgi matn:\n<i>{display}</i>",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ O'zgartirish", callback_data=f"txt_edit_{key}")],
+                _back("texts"),
+            ]))
+
+    elif data == "set_pin":
+        _clear(context)
+        pin_on   = get_setting("pinned_enabled") == "true"
+        pin_text = get_setting("pinned_text")
+        display  = escape(pin_text[:200]) if pin_text else "<i>O'rnatilmagan</i>"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔴 O'chirish" if pin_on else "🟢 Yoqish", callback_data="set_pin_tog")],
+            [InlineKeyboardButton("✏️ Matnni o'zgartirish", callback_data="set_pin_edit")],
+            _back("settings"),
         ])
-        await _safe_edit(query,
-            f"📝 <b>{label}</b>\n\n"
-            f"📌 Hozirgi matn:\n<i>{display}</i>",
-            keyboard,
-        )
+        state = "🟢 Yoqiq" if pin_on else "🔴 O'chiq"
+        await _edit(query,
+            f"📌 <b>Pinlangan xabar</b>\n\nHolat: {state}\n\nMatn:\n{display}", kb)
 
-    # ── Bloklangan foydalanuvchilar ──────────────────────────────────────────
-    elif data == "blk_list":
-        users = get_blocked_users()
-        if not users:
-            text = "🚫 <b>Bloklangan foydalanuvchilar</b>\n\nHech kim bloklangani yo'q."
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Orqaga", callback_data="back")]
-            ])
-        else:
-            text = f"🚫 <b>Bloklangan foydalanuvchilar</b> ({len(users)} ta)\n\nFoydalanuvchini tanlang:"
-            keyboard = _blocked_list_keyboard(users)
-        await _safe_edit(query, text, keyboard)
+    elif data == "set_pin_tog":
+        cur = get_setting("pinned_enabled") == "true"
+        set_setting("pinned_enabled", "false" if cur else "true")
+        await query.answer("✅ O'zgartirildi!")
+        pin_on   = get_setting("pinned_enabled") == "true"
+        pin_text = get_setting("pinned_text")
+        display  = escape(pin_text[:200]) if pin_text else "<i>O'rnatilmagan</i>"
+        state    = "🟢 Yoqiq" if pin_on else "🔴 O'chiq"
+        await _edit(query,
+            f"📌 <b>Pinlangan xabar</b>\n\nHolat: {state}\n\nMatn:\n{display}",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔴 O'chirish" if pin_on else "🟢 Yoqish", callback_data="set_pin_tog")],
+                [InlineKeyboardButton("✏️ Matnni o'zgartirish", callback_data="set_pin_edit")],
+                _back("settings"),
+            ]))
 
-    elif data.startswith("blk_info_"):
-        user_id = int(data.split("_", 2)[2])
-        u = get_user(user_id)
-        if not u:
-            await query.answer("Foydalanuvchi topilmadi", show_alert=True)
+    elif data == "set_pin_edit":
+        context.user_data["waiting_pinned_text"] = True
+        await _edit(query,
+            "📌 <b>Pinlangan xabar</b>\n\nYangi matnni yuboring (HTML ishlaydi):",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Bekor qilish", callback_data="set_pin")]]))
+
+    elif data == "set_chan":
+        _clear(context)
+        chan_on = get_setting("channel_check_enabled") == "true"
+        chan_id = get_setting("channel_id") or "<i>O'rnatilmagan</i>"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔴 O'chirish" if chan_on else "🟢 Yoqish", callback_data="set_chan_tog")],
+            [InlineKeyboardButton("✏️ Kanal ID o'rnatish", callback_data="set_chan_id")],
+            _back("settings"),
+        ])
+        state = "🟢 Yoqiq" if chan_on else "🔴 O'chiq"
+        await _edit(query,
+            f"🔔 <b>Kanal obuna</b>\n\nHolat: {state}\nKanal: <code>{chan_id}</code>", kb)
+
+    elif data == "set_chan_tog":
+        cur = get_setting("channel_check_enabled") == "true"
+        set_setting("channel_check_enabled", "false" if cur else "true")
+        await query.answer("✅ O'zgartirildi!")
+        chan_on = get_setting("channel_check_enabled") == "true"
+        chan_id = get_setting("channel_id") or "<i>O'rnatilmagan</i>"
+        state   = "🟢 Yoqiq" if chan_on else "🔴 O'chiq"
+        await _edit(query,
+            f"🔔 <b>Kanal obuna</b>\n\nHolat: {state}\nKanal: <code>{chan_id}</code>",
+            InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔴 O'chirish" if chan_on else "🟢 Yoqish", callback_data="set_chan_tog")],
+                [InlineKeyboardButton("✏️ Kanal ID o'rnatish", callback_data="set_chan_id")],
+                _back("settings"),
+            ]))
+
+    elif data == "set_chan_id":
+        context.user_data["waiting_channel_id"] = True
+        await _edit(query,
+            "✏️ <b>Kanal ID</b>\n\nKanal username yoki ID yuboring:\nMisol: <code>@mychannel</code> yoki <code>-1001234567890</code>",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Bekor qilish", callback_data="set_chan")]]))
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ADMINLAR (faqat ega)
+    # ══════════════════════════════════════════════════════════════════════════
+    elif data == "admins":
+        if uid != MAIN_ADMIN_ID:
+            await query.answer("❌ Faqat bot egasi uchun!", show_alert=True)
             return
-        name  = escape(u.get("first_name", "—"))
-        uname = f"@{escape(u['username'])}" if u.get("username") else "—"
-        text = (
-            f"👤 <b>{name}</b>\n\n"
-            f"🆔 <code>{user_id}</code>\n"
-            f"📱 {uname}\n"
-            f"🚫 Hozirda bloklangan"
-        )
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔓 Blokdan chiqarish", callback_data=f"unblk_{user_id}")],
-            [InlineKeyboardButton("🔙 Orqaga",             callback_data="blk_list")],
-        ])
-        await _safe_edit(query, text, keyboard)
+        _clear(context)
+        await _edit(query, "👑 <b>Adminlar ro'yxati</b>", _admins_kb())
 
-    elif data.startswith("unblk_"):
-        user_id = int(data.split("_", 1)[1])
-        unblock_user(user_id)
-        await query.answer("✅ Blok olib tashlandi!", show_alert=True)
-        # Yangilangan ro'yxatni ko'rsat
-        users = get_blocked_users()
-        if not users:
-            text = "🚫 <b>Bloklangan foydalanuvchilar</b>\n\nHech kim bloklangani yo'q."
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Orqaga", callback_data="back")]
-            ])
-        else:
-            text = f"🚫 <b>Bloklangan foydalanuvchilar</b> ({len(users)} ta)\n\nFoydalanuvchini tanlang:"
-            keyboard = _blocked_list_keyboard(users)
-        await _safe_edit(query, text, keyboard)
+    elif data == "adm_add":
+        if uid != MAIN_ADMIN_ID:
+            await query.answer("❌ Faqat bot egasi uchun!", show_alert=True)
+            return
+        context.user_data["waiting_admin_id"] = True
+        await _edit(query,
+            "👤 <b>Admin qo'shish</b>\n\nTelegram ID yuboring:\n<i>@userinfobot orqali bilib olsangiz bo'ladi</i>",
+            InlineKeyboardMarkup([_back("admins")]))
 
-    # ── Foydalanuvchini bloklash (xabar tagidagi tugma) ──────────────────────
+    elif data.startswith("adm_info_"):
+        admin_id = int(data.split("_", 2)[2])
+        is_main  = (admin_id == MAIN_ADMIN_ID)
+        u        = get_user(admin_id)
+        name     = escape(u["first_name"]) if u else "—"
+        added    = "—"
+        if not is_main:
+            raw = get_admin_added_at(admin_id)
+            if raw:
+                try:
+                    added = datetime.fromisoformat(raw.replace("Z", "+00:00")).strftime("%d.%m.%Y")
+                except Exception:
+                    added = raw[:10]
+        text  = f"👤 <b>{name}</b>\n\n🆔 <code>{admin_id}</code>\n"
+        text += "👑 Asosiy admin\n" if is_main else f"📅 Qo'shilgan: {added}\n"
+        buttons = []
+        if not is_main:
+            buttons.append([InlineKeyboardButton("🗑 O'chirish", callback_data=f"adm_del_{admin_id}")])
+        buttons.append(_back("admins"))
+        await _edit(query, text, InlineKeyboardMarkup(buttons))
+
+    elif data.startswith("adm_del_"):
+        if uid != MAIN_ADMIN_ID:
+            await query.answer("❌ Faqat bot egasi uchun!", show_alert=True)
+            return
+        admin_id = int(data.split("_", 2)[2])
+        if admin_id == MAIN_ADMIN_ID:
+            await query.answer("❌ Asosiy adminni o'chirib bo'lmaydi!", show_alert=True)
+            return
+        remove_admin(admin_id)
+        await query.answer("✅ Admin o'chirildi!", show_alert=True)
+        await _edit(query, "👑 <b>Adminlar ro'yxati</b>", _admins_kb())
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # XABAR TUGMALARI (user xabari ostida)
+    # ══════════════════════════════════════════════════════════════════════════
     elif data.startswith("block_"):
         user_id = int(data.split("_", 1)[1])
         if is_admin(user_id):
             await query.answer("❌ Adminni bloklash mumkin emas!", show_alert=True)
             return
         mark_blocked(user_id)
-        await query.answer("✅ Foydalanuvchi bloklandi!", show_alert=True)
-        # Blokla tugmasini olib tashlaymiz
+        await query.answer("✅ Bloklandi!", show_alert=True)
         try:
-            await query.edit_message_reply_markup(reply_markup=None)
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🚫 Bloklangan", callback_data="noop")
+            ]]))
         except BadRequest:
             pass
 
+    elif data.startswith("reply_"):
+        user_id = int(data.split("_", 1)[1])
+        u    = get_user(user_id)
+        name = escape(u["first_name"]) if u else str(user_id)
+        uname = f"@{u['username']}" if u and u.get("username") else "—"
+        msg_count = get_user_message_count(user_id)
+        context.user_data["replying_to"] = {
+            "user_id": user_id,
+            "msg_id":  query.message.message_id,
+            "chat_id": query.message.chat_id,
+        }
+        await query.message.reply_text(
+            f"✏️ <b>Javob yozilyapti</b>\n\n"
+            f"👤 <b>{name}</b>  ·  {escape(uname)}\n"
+            f"🆔 <code>{user_id}</code>\n"
+            f"💬 Jami xabarlar: {msg_count}\n\n"
+            f"Matn, rasm, video, stiker — istalgan narsani yuboring.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Bekor qilish", callback_data="rpl_cancel")
+            ]]),
+        )
 
-# ─── Yordamchi ────────────────────────────────────────────────────────────────
+    elif data == "rpl_cancel":
+        context.user_data.pop("replying_to", None)
+        await query.edit_message_text("❌ Javob bekor qilindi.")
 
-async def _safe_edit(query, text: str, keyboard: InlineKeyboardMarkup) -> None:
+    elif data.startswith("usr_prof_"):
+        await _show_user_profile(query, context, int(data.split("_", 2)[2]))
+
+
+# ─── Yordamchi funksiyalar ────────────────────────────────────────────────────
+
+async def _show_user_profile(query, context, user_id: int) -> None:
+    u = get_user(user_id)
+    if not u:
+        await query.answer("Foydalanuvchi topilmadi!", show_alert=True)
+        return
+
+    name      = escape(u.get("first_name", "—"))
+    uname     = f"@{escape(u['username'])}" if u.get("username") else "—"
+    is_blk    = u.get("is_blocked", False)
+    is_vip    = u.get("vip", False)
+    joined    = (u.get("joined_at") or "")[:10]
+    msg_count = get_user_message_count(user_id)
+
+    vip_str = 'Ha' if is_vip else "Yo'q"
+    text = (
+        f"👤 <b>{name}</b>\n\n"
+        f"🆔 <code>{user_id}</code>  ·  {uname}\n"
+        f"📅 Qo'shilgan: {joined}\n"
+        f"💬 Xabarlar: {msg_count}\n"
+        f"⭐ VIP: {vip_str}\n"
+        f"🚫 Holat: {'Bloklangan' if is_blk else 'Faol'}"
+    )
+
+    buttons = [
+        [
+            InlineKeyboardButton("📩 Javob", callback_data=f"reply_{user_id}"),
+            InlineKeyboardButton("🔴 Blokdan chiq" if is_blk else "🚫 Blokla",
+                                 callback_data=f"unblk_{user_id}" if is_blk else f"block_{user_id}"),
+        ],
+        [
+            InlineKeyboardButton("⭐ VIP olib tashlash" if is_vip else "⭐ VIP qo'shish",
+                                 callback_data=f"vip_del_{user_id}" if is_vip else f"vip_add_id_{user_id}"),
+        ],
+        _back("users"),
+    ]
+    await _edit(query, text, InlineKeyboardMarkup(buttons))
+
+
+async def _send_graph(query, context) -> None:
     try:
-        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        await query.message.reply_text("❌ Grafik uchun matplotlib o'rnatilmagan.")
+        return
+
+    data   = get_user_growth(7)
+    dates  = [d["date"][5:] for d in data]
+    counts = [d["count"] for d in data]
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    fig.patch.set_facecolor("#FFFFFF")
+    ax.set_facecolor("#F5F5F5")
+    bars = ax.bar(dates, counts, color="#6C8EBF", width=0.55, edgecolor="none")
+    ax.bar_label(bars, padding=3, fontsize=10)
+    ax.set_title("So'nggi 7 kunda yangi foydalanuvchilar", fontsize=12, pad=10)
+    ax.set_ylim(0, max(counts or [1]) + max(1, max(counts or [1]) * 0.25))
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    buf.seek(0)
+    plt.close(fig)
+
+    total = sum(counts)
+    await context.bot.send_photo(
+        chat_id=query.from_user.id,
+        photo=buf,
+        caption=f"📈 So'nggi 7 kun: <b>{total}</b> ta yangi foydalanuvchi",
+        parse_mode="HTML",
+    )
+
+
+def _admins_kb() -> InlineKeyboardMarkup:
+    buttons = []
+    for aid in get_all_admins():
+        u    = get_user(aid)
+        name = escape(u["first_name"]) if u else str(aid)
+        lbl  = f"👑 {name}" if aid == MAIN_ADMIN_ID else f"👤 {name}"
+        buttons.append([InlineKeyboardButton(lbl, callback_data=f"adm_info_{aid}")])
+    buttons.append([InlineKeyboardButton("➕ Admin qo'shish", callback_data="adm_add")])
+    buttons.append(_back())
+    return InlineKeyboardMarkup(buttons)
+
+
+async def _edit(query, text: str, kb: InlineKeyboardMarkup) -> None:
+    try:
+        await query.edit_message_text(text, reply_markup=kb, parse_mode="HTML")
     except BadRequest as e:
-        if "Message is not modified" not in str(e):
+        if "not modified" not in str(e).lower():
             raise
+
+
+# "vip_add_id_{id}" — profil sahifasidan VIP qo'shish
+# handle_callback da bu callback "usr_prof_" dan keyin keladi
+# Uni ham qo'shamiz handle_callback funksiyasiga:
+
+
+async def _handle_vip_add_id(query, user_id: int) -> None:
+    set_vip(user_id, True)
+    await query.answer("✅ VIP qo'shildi!", show_alert=True)
+    # Profilni yangilaymiz
+    await _show_user_profile(query, None, user_id)
+
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    data  = (query.data or "")
+    if data.startswith("vip_add_id_"):
+        if not is_admin(query.from_user.id):
+            await query.answer("❌ Ruxsat yo'q!", show_alert=True)
+            return
+        await query.answer()
+        user_id = int(data.split("_", 3)[3])
+        set_vip(user_id, True)
+        await query.answer("✅ VIP qo'shildi!", show_alert=True)
+        await _show_user_profile(query, context, user_id)
+        return
+    await _handle_callback_inner(update, context)

@@ -1,26 +1,26 @@
 import os
-import logging
 import asyncio
+import logging
 from aiohttp import web
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, filters,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import BOT_TOKEN
 from start_handler import start_command
 from admin_handler import admin_command, handle_callback
-from message_handler import handle_text, handle_media
+from message_handler import handle_text, handle_media, info_command
 
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO,
-)
+logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+MEDIA_FILTER = (
+    filters.PHOTO | filters.AUDIO | filters.VOICE | filters.VIDEO
+    | filters.VIDEO_NOTE | filters.Sticker.ALL | filters.ANIMATION
+    | filters.Document.ALL
+)
 
 
 async def post_init(app: Application) -> None:
@@ -28,40 +28,56 @@ async def post_init(app: Application) -> None:
     scheduler.start()
     app.bot_data["scheduler"] = scheduler
     logger.info("✅ APScheduler ishga tushdi.")
+    await _restore_scheduled_broadcasts(app, scheduler)
+    _restore_reminder(app.bot, scheduler)
 
 
 async def post_shutdown(app: Application) -> None:
-    scheduler = app.bot_data.get("scheduler")
-    if scheduler and scheduler.running:
-        scheduler.shutdown()
+    s = app.bot_data.get("scheduler")
+    if s and s.running:
+        s.shutdown()
         logger.info("⛔ APScheduler to'xtatildi.")
 
 
-MEDIA_FILTER = (
-    filters.PHOTO
-    | filters.AUDIO
-    | filters.VOICE
-    | filters.VIDEO
-    | filters.VIDEO_NOTE
-    | filters.Sticker.ALL
-    | filters.ANIMATION
-    | filters.Document.ALL
-)
+async def _restore_scheduled_broadcasts(app: Application, scheduler) -> None:
+    from database import get_pending_broadcasts, delete_scheduled_broadcast
+    from message_handler import _run_broadcast_job
+    from datetime import datetime, timezone
+    bcs = get_pending_broadcasts()
+    now = datetime.now(timezone.utc)
+    for bc in bcs:
+        try:
+            dt = datetime.fromisoformat(bc["scheduled_at"])
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt <= now:
+                asyncio.create_task(_run_broadcast_job(
+                    app.bot, bc["id"], bc["from_chat_id"], bc["message_id"]
+                ))
+            else:
+                scheduler.add_job(
+                    _run_broadcast_job, "date", run_date=dt,
+                    args=[app.bot, bc["id"], bc["from_chat_id"], bc["message_id"]],
+                    id=f"bc_{bc['id']}", replace_existing=True,
+                )
+        except Exception as e:
+            logger.error(f"Broadcast restore: {e}")
 
 
-async def handle_home(request):
-    return web.Response(text="Bot muvaffaqiyatli ishlamoqda!", status=200)
+def _restore_reminder(bot, scheduler) -> None:
+    from database import get_setting
+    from message_handler import _send_reminder
+    enabled  = get_setting("reminder_enabled") == "true"
+    interval = int(get_setting("reminder_interval") or 2)
+    if enabled:
+        scheduler.add_job(
+            _send_reminder, "interval", hours=interval,
+            args=[bot], id="reminder_job", replace_existing=True,
+        )
 
 
-async def start_web_server():
-    app_web = web.Application()
-    app_web.router.add_get("/", handle_home)
-    port = int(os.environ.get("PORT", 10000))
-    runner = web.AppRunner(app_web)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    logger.info(f"🌐 Veb-server {port}-portda ishga tushdi.")
+async def _health(request):
+    return web.Response(text="OK", status=200)
 
 
 async def main_async() -> None:
@@ -75,29 +91,33 @@ async def main_async() -> None:
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("info",  info_command))
     app.add_handler(CallbackQueryHandler(handle_callback))
-
-    # "🛠 Admin panel" tugmasi — admin_command sifatida ishlaydi
     app.add_handler(MessageHandler(
-        filters.Text(["🛠 Admin panel"]) & ~filters.COMMAND,
-        admin_command,
+        filters.Text(["🛠 Admin panel"]) & ~filters.COMMAND, admin_command
     ))
-
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(MEDIA_FILTER & ~filters.COMMAND,  handle_media))
+    app.add_handler(MessageHandler(MEDIA_FILTER & ~filters.COMMAND, handle_media))
 
-    await start_web_server()
+    # Render uchun web server
+    web_app = web.Application()
+    web_app.router.add_get("/", _health)
+    port    = int(os.environ.get("PORT", 10000))
+    runner  = web.AppRunner(web_app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", port).start()
+    logger.info(f"🌐 Web server :{port}")
 
-    logger.info("✅ Bot ishga tushdi!")
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
+    logger.info("✅ Bot ishga tushdi!")
 
     while True:
         await asyncio.sleep(3600)
 
 
-def main() -> None:
+def main():
     asyncio.run(main_async())
 
 
