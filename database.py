@@ -6,11 +6,13 @@ from config import SUPABASE_URL, SUPABASE_KEY, MAIN_ADMIN_ID
 logger = logging.getLogger(__name__)
 _client: Client | None = None
 
+
 def get_db() -> Client:
     global _client
     if _client is None:
         _client = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _client
+
 
 # ─── Matnlar ──────────────────────────────────────────────────────────────────
 TEXT_LABELS = {
@@ -25,13 +27,15 @@ TEXT_DEFAULTS = {
         "Assalamu a'layk 👋\n\n"
         "Agar savolingiz yoki taklifingiz bo'lsa, shu yerga yozib qoldirishingiz mumkin 🙂\n\n"
         "Meni kuzatib borish uchun:\n"
-        '👉 <a href="https://t.me/+4-8lpgLcdvU5ZTcy">Dev with Zubayr</a>'
+        '👉 <a href="https://t.me/+4-8lpgLcdvU5ZTcy">Dev with Zubayr</a>\n'
+        '👉 <a href="https://t.me/+uKrIs6gQR4JjYjFi">She\'rlar bog\'i 🍃</a>'
     ),
     "rate_limit":   "⚠️ Vaqtinchalik cheklov. 1 soatdan so'ng qayta yuboring.",
     "blocked":      "🚫 Siz bloklangansiz. Xabaringiz yetib bormaydi.",
     "message_sent": "✅ Xabaringiz yetkazildi, tez orada javob beriladi 🙂",
     "rate_reset":   "✅ Endi yana yozishingiz mumkin!",
 }
+
 
 def get_text(key: str) -> str:
     try:
@@ -42,8 +46,10 @@ def get_text(key: str) -> str:
         pass
     return TEXT_DEFAULTS.get(key, "")
 
+
 def set_text(key: str, value: str) -> None:
     get_db().table("bot_texts").upsert({"key": key, "value": value}).execute()
+
 
 # ─── Sozlamalar ───────────────────────────────────────────────────────────────
 SETTING_DEFAULTS = {
@@ -55,6 +61,7 @@ SETTING_DEFAULTS = {
     "pinned_text":           "",
 }
 
+
 def get_setting(key: str) -> str:
     try:
         r = get_db().table("bot_settings").select("value").eq("key", key).execute()
@@ -64,8 +71,10 @@ def get_setting(key: str) -> str:
         pass
     return SETTING_DEFAULTS.get(key, "")
 
+
 def set_setting(key: str, value: str) -> None:
     get_db().table("bot_settings").upsert({"key": key, "value": value}).execute()
+
 
 # ─── Users ────────────────────────────────────────────────────────────────────
 def get_or_create_user(user_id: int, first_name: str, username: str | None = None) -> dict | None:
@@ -80,18 +89,23 @@ def get_or_create_user(user_id: int, first_name: str, username: str | None = Non
     }).execute()
     return new.data[0] if new.data else None
 
+
 def get_user(user_id: int) -> dict | None:
     r = get_db().table("users").select("*").eq("user_id", user_id).execute()
     return r.data[0] if r.data else None
 
+
 def update_user(user_id: int, **kwargs) -> None:
     get_db().table("users").update(kwargs).eq("user_id", user_id).execute()
+
 
 def mark_blocked(user_id: int) -> None:
     get_db().table("users").update({"is_blocked": True}).eq("user_id", user_id).execute()
 
+
 def unblock_user(user_id: int) -> None:
     get_db().table("users").update({"is_blocked": False}).eq("user_id", user_id).execute()
+
 
 def unblock_all() -> int:
     try:
@@ -100,11 +114,13 @@ def unblock_all() -> int:
         get_db().table("users").update({"is_blocked": False}).eq("is_blocked", True).execute()
         return count
     except Exception as e:
-        logger.error(f"unblock_all xatosi: {e}")
+        logger.error(f"unblock_all: {e}")
         return 0
+
 
 def set_vip(user_id: int, is_vip: bool) -> None:
     get_db().table("users").update({"vip": is_vip}).eq("user_id", user_id).execute()
+
 
 def get_vip_users() -> list[dict]:
     try:
@@ -113,6 +129,7 @@ def get_vip_users() -> list[dict]:
     except Exception:
         return []
 
+
 def get_blocked_users() -> list[dict]:
     try:
         r = get_db().table("users").select("user_id, first_name, username").eq("is_blocked", True).execute()
@@ -120,9 +137,11 @@ def get_blocked_users() -> list[dict]:
     except Exception:
         return []
 
+
 def get_all_active_users() -> list[int]:
     r = get_db().table("users").select("user_id").eq("is_blocked", False).execute()
     return [row["user_id"] for row in r.data]
+
 
 def get_user_message_count(user_id: int) -> int:
     try:
@@ -131,20 +150,61 @@ def get_user_message_count(user_id: int) -> int:
     except Exception:
         return 0
 
+
 def search_users(query: str) -> list[dict]:
+    """ID, ism yoki @username bilan qidirish."""
     try:
-        db = get_db()
+        db  = get_db()
+        sel = "user_id, first_name, username, is_blocked, vip"
+
+        # 1. Raqam bo'lsa — ID bo'yicha
         try:
-            uid = int(query)
-            r = db.table("users").select("user_id, first_name, username, is_blocked, vip").eq("user_id", uid).execute()
+            uid = int(query.lstrip("@").strip())
+            r   = db.table("users").select(sel).eq("user_id", uid).execute()
+            if r.data:
+                return r.data
         except ValueError:
-            r = db.table("users").select("user_id, first_name, username, is_blocked, vip").ilike("first_name", f"%{query}%").limit(10).execute()
-        return r.data or []
+            pass
+
+        # 2. Username va ism bo'yicha (@ belgi olib tashlanadi)
+        clean = query.lstrip("@").strip()
+        seen, results = set(), []
+
+        r_u = db.table("users").select(sel).ilike("username",   f"%{clean}%").limit(10).execute()
+        r_n = db.table("users").select(sel).ilike("first_name", f"%{clean}%").limit(10).execute()
+
+        for row in (r_u.data or []) + (r_n.data or []):
+            if row["user_id"] not in seen:
+                seen.add(row["user_id"])
+                results.append(row)
+
+        return results[:10]
     except Exception:
         return []
 
+
+def resolve_user_id(query: str) -> int | None:
+    """ID yoki @username dan user_id qaytaradi. Topilmasa None."""
+    q = query.strip()
+    try:
+        return int(q.lstrip("@"))
+    except ValueError:
+        pass
+    clean = q.lstrip("@").lower()
+    try:
+        r = get_db().table("users").select("user_id, username").ilike("username", f"%{clean}%").limit(5).execute()
+        for row in (r.data or []):
+            if (row.get("username") or "").lower() == clean:
+                return row["user_id"]
+        if r.data:
+            return r.data[0]["user_id"]
+    except Exception:
+        pass
+    return None
+
+
 def get_stats() -> dict:
-    db = get_db()
+    db    = get_db()
     today = date.today().isoformat()
     try:
         total_r   = db.table("users").select("user_id", count="exact").execute()
@@ -158,8 +218,9 @@ def get_stats() -> dict:
             "vip":     vip_r.count     or 0,
         }
     except Exception as e:
-        logger.error(f"get_stats xatosi: {e}")
+        logger.error(f"get_stats: {e}")
         return {"total": 0, "today": 0, "blocked": 0, "vip": 0}
+
 
 def get_user_growth(days: int = 7) -> list[dict]:
     try:
@@ -178,51 +239,79 @@ def get_user_growth(days: int = 7) -> list[dict]:
                 counts[day] += 1
     return [{"date": k, "count": v} for k, v in sorted(counts.items())]
 
+
 # ─── Xabarlar ─────────────────────────────────────────────────────────────────
 def save_message(user_id: int, text: str) -> None:
     get_db().table("messages").insert({"user_id": user_id, "text": text}).execute()
+
 
 def save_admin_reply(admin_id: int, user_id: int, text: str) -> None:
     try:
         get_db().table("admin_replies").insert({"admin_id": admin_id, "user_id": user_id, "text": text}).execute()
     except Exception as e:
-        logger.error(f"save_admin_reply xatosi: {e}")
+        logger.error(f"save_admin_reply: {e}")
+
 
 # ─── Message map ──────────────────────────────────────────────────────────────
 def save_message_map(admin_msg_id: int, admin_chat_id: int, user_id: int,
                      btn_msg_id: int = None, preview: str = "") -> None:
     get_db().table("message_map").insert({
-        "admin_msg_id":   admin_msg_id,
-        "admin_chat_id":  admin_chat_id,
-        "user_id":        user_id,
-        "btn_msg_id":     btn_msg_id or admin_msg_id,
+        "admin_msg_id":    admin_msg_id,
+        "admin_chat_id":   admin_chat_id,
+        "user_id":         user_id,
+        "btn_msg_id":      btn_msg_id or admin_msg_id,
         "message_preview": preview[:80],
-        "status":         "pending",
+        "status":          "pending",
     }).execute()
+
 
 def get_message_map_row(admin_msg_id: int, admin_chat_id: int) -> dict | None:
     r = (get_db().table("message_map").select("*")
          .eq("admin_msg_id", admin_msg_id).eq("admin_chat_id", admin_chat_id).execute())
     return r.data[0] if r.data else None
 
-def get_user_from_map(admin_msg_id: int, admin_chat_id: int) -> int | None:
-    row = get_message_map_row(admin_msg_id, admin_chat_id)
-    return row["user_id"] if row else None
 
 def update_message_status(admin_msg_id: int, admin_chat_id: int, status: str) -> None:
     try:
-        get_db().table("message_map").update({"status": status}).eq("admin_msg_id", admin_msg_id).eq("admin_chat_id", admin_chat_id).execute()
+        get_db().table("message_map").update({"status": status}) \
+            .eq("admin_msg_id", admin_msg_id).eq("admin_chat_id", admin_chat_id).execute()
     except Exception as e:
-        logger.error(f"update_message_status xatosi: {e}")
+        logger.error(f"update_message_status: {e}")
+
 
 def get_pending_messages(admin_chat_id: int) -> list[dict]:
     try:
-        r = (get_db().table("message_map").select("admin_msg_id, user_id, message_preview, created_at")
+        r = (get_db().table("message_map")
+             .select("admin_msg_id, user_id, message_preview, created_at")
              .eq("admin_chat_id", admin_chat_id).eq("status", "pending")
              .order("created_at", desc=False).limit(20).execute())
         return r.data or []
     except Exception:
         return []
+
+
+# ─── Admin reply map (xabar tahrirlash uchun) ────────────────────────────────
+def save_admin_reply_map(admin_msg_id: int, admin_chat_id: int,
+                         user_id: int, bot_msg_id: int) -> None:
+    try:
+        get_db().table("admin_reply_map").upsert({
+            "admin_msg_id":  admin_msg_id,
+            "admin_chat_id": admin_chat_id,
+            "user_id":       user_id,
+            "bot_msg_id":    bot_msg_id,
+        }).execute()
+    except Exception as e:
+        logger.error(f"save_admin_reply_map: {e}")
+
+
+def get_admin_reply_target(admin_msg_id: int, admin_chat_id: int) -> dict | None:
+    try:
+        r = (get_db().table("admin_reply_map").select("user_id, bot_msg_id")
+             .eq("admin_msg_id", admin_msg_id).eq("admin_chat_id", admin_chat_id).execute())
+        return r.data[0] if r.data else None
+    except Exception:
+        return None
+
 
 # ─── Adminlar ─────────────────────────────────────────────────────────────────
 def is_admin(user_id: int) -> bool:
@@ -234,21 +323,25 @@ def is_admin(user_id: int) -> bool:
     except Exception:
         return False
 
+
 def add_admin(user_id: int) -> None:
     get_db().table("admins").upsert({"user_id": user_id}).execute()
+
 
 def remove_admin(user_id: int) -> None:
     get_db().table("admins").delete().eq("user_id", user_id).execute()
 
+
 def get_all_admins() -> list[int]:
     try:
-        r = get_db().table("admins").select("user_id").execute()
+        r   = get_db().table("admins").select("user_id").execute()
         ids = [row["user_id"] for row in r.data]
     except Exception:
         ids = []
     if MAIN_ADMIN_ID not in ids:
         ids.insert(0, MAIN_ADMIN_ID)
     return ids
+
 
 def get_admin_added_at(user_id: int) -> str | None:
     try:
@@ -259,8 +352,10 @@ def get_admin_added_at(user_id: int) -> str | None:
         pass
     return None
 
+
 # ─── Jadval broadcast ─────────────────────────────────────────────────────────
-def save_scheduled_broadcast(admin_id: int, from_chat_id: int, message_id: int, scheduled_at: str) -> int | None:
+def save_scheduled_broadcast(admin_id: int, from_chat_id: int,
+                              message_id: int, scheduled_at: str) -> int | None:
     try:
         r = get_db().table("scheduled_broadcasts").insert({
             "admin_id": admin_id, "from_chat_id": from_chat_id,
@@ -268,8 +363,9 @@ def save_scheduled_broadcast(admin_id: int, from_chat_id: int, message_id: int, 
         }).execute()
         return r.data[0]["id"] if r.data else None
     except Exception as e:
-        logger.error(f"save_scheduled_broadcast xatosi: {e}")
+        logger.error(f"save_scheduled_broadcast: {e}")
         return None
+
 
 def get_pending_broadcasts() -> list[dict]:
     try:
@@ -277,6 +373,7 @@ def get_pending_broadcasts() -> list[dict]:
         return r.data or []
     except Exception:
         return []
+
 
 def delete_scheduled_broadcast(bc_id: int) -> None:
     get_db().table("scheduled_broadcasts").delete().eq("id", bc_id).execute()

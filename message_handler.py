@@ -10,11 +10,12 @@ from database import (
     get_or_create_user, get_user, update_user,
     save_message, save_admin_reply,
     save_message_map, get_message_map_row,
+    save_admin_reply_map, get_admin_reply_target,
     is_admin, get_all_admins, get_all_active_users,
     add_admin, mark_blocked, get_text, set_text,
     TEXT_LABELS, set_vip, get_setting,
     update_message_status, save_scheduled_broadcast,
-    search_users, get_user_message_count,
+    search_users, get_user_message_count, resolve_user_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,40 +47,51 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _handle_user_media(update, context)
 
 
+async def handle_edited(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin o'z javobini tahrir qilsa — user tomonida ham yangilanadi."""
+    if not update.edited_message:
+        return
+    if not is_admin(update.effective_user.id):
+        return
+    msg    = update.edited_message
+    target = get_admin_reply_target(msg.message_id, msg.chat_id)
+    if not target:
+        return
+    new_text = msg.text or msg.caption
+    if not new_text:
+        return
+    try:
+        await context.bot.edit_message_text(
+            chat_id=target["user_id"],
+            message_id=target["bot_msg_id"],
+            text=f"📩 Javob:\n\n{new_text}",
+        )
+    except Exception as e:
+        logger.error(f"handle_edited: {e}")
+
+
 # ─── Admin text yo'naltiruvchi ────────────────────────────────────────────────
 
 async def _handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    ud = context.user_data
+    ud  = context.user_data
     msg = update.message
-
     if msg.reply_to_message:
         context.user_data.pop("replying_to", None)
         await _forward_text_reply(update, context)
-    elif ud.get("waiting_broadcast"):
-        await _do_broadcast(update, context)
-    elif ud.get("waiting_admin_id"):
-        await _do_add_admin(update, context)
-    elif ud.get("waiting_text_edit"):
-        await _do_edit_text(update, context)
-    elif ud.get("replying_to"):
-        await _do_direct_reply(update, context)
-    elif ud.get("waiting_user_search"):
-        await _do_user_search(update, context)
-    elif ud.get("waiting_vip_add"):
-        await _do_vip_add(update, context)
-    elif ud.get("waiting_channel_id"):
-        await _do_set_channel_id(update, context)
-    elif ud.get("waiting_pinned_text"):
-        await _do_set_pinned_text(update, context)
-    elif ud.get("waiting_bc_message"):
-        await _do_save_bc_message(update, context)
-    elif ud.get("waiting_bc_time"):
-        await _do_schedule_broadcast(update, context)
-    elif ud.get("waiting_remind_interval"):
-        await _do_set_remind_interval(update, context)
+    elif ud.get("waiting_broadcast"):       await _do_broadcast(update, context)
+    elif ud.get("waiting_admin_id"):        await _do_add_admin(update, context)
+    elif ud.get("waiting_text_edit"):       await _do_edit_text(update, context)
+    elif ud.get("replying_to"):             await _do_direct_reply(update, context)
+    elif ud.get("waiting_user_search"):     await _do_user_search(update, context)
+    elif ud.get("waiting_vip_add"):         await _do_vip_add(update, context)
+    elif ud.get("waiting_channel_id"):      await _do_set_channel_id(update, context)
+    elif ud.get("waiting_pinned_text"):     await _do_set_pinned_text(update, context)
+    elif ud.get("waiting_bc_message"):      await _do_save_bc_message(update, context)
+    elif ud.get("waiting_bc_time"):         await _do_schedule_broadcast(update, context)
+    elif ud.get("waiting_remind_interval"): await _do_set_remind_interval(update, context)
 
 
-# ─── Admin reply (xabar orqali) ───────────────────────────────────────────────
+# ─── Admin reply (xabar reply orqali) ────────────────────────────────────────
 
 async def _forward_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_id = update.message.reply_to_message.message_id
@@ -90,8 +102,9 @@ async def _forward_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     user_id = row["user_id"]
     try:
-        await context.bot.send_message(user_id, f"📩 Javob:\n\n{update.message.text}")
+        sent = await context.bot.send_message(user_id, f"📩 Javob:\n\n{update.message.text}")
         save_admin_reply(update.effective_user.id, user_id, update.message.text or "")
+        save_admin_reply_map(update.message.message_id, chat_id, user_id, sent.message_id)
         await _mark_replied(context, row)
         await update.message.reply_text("✅ Javob yuborildi.")
     except Exception as e:
@@ -108,9 +121,7 @@ async def _forward_media_reply(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = row["user_id"]
     try:
         await context.bot.copy_message(
-            chat_id=user_id,
-            from_chat_id=chat_id,
-            message_id=update.message.message_id,
+            chat_id=user_id, from_chat_id=chat_id, message_id=update.message.message_id,
         )
         save_admin_reply(update.effective_user.id, user_id, "[media]")
         await _mark_replied(context, row)
@@ -124,9 +135,11 @@ async def _forward_media_reply(update: Update, context: ContextTypes.DEFAULT_TYP
 async def _do_direct_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     info    = context.user_data.pop("replying_to")
     user_id = info["user_id"]
+    chat_id = update.effective_chat.id
     try:
-        await context.bot.send_message(user_id, f"📩 Javob:\n\n{update.message.text}")
+        sent = await context.bot.send_message(user_id, f"📩 Javob:\n\n{update.message.text}")
         save_admin_reply(update.effective_user.id, user_id, update.message.text or "")
+        save_admin_reply_map(update.message.message_id, chat_id, user_id, sent.message_id)
         await _mark_replied_by_info(context, info)
         await update.message.reply_text("✅ Javob yuborildi.")
     except Exception as e:
@@ -138,8 +151,7 @@ async def _do_direct_media_reply(update: Update, context: ContextTypes.DEFAULT_T
     user_id = info["user_id"]
     try:
         await context.bot.copy_message(
-            chat_id=user_id,
-            from_chat_id=update.effective_chat.id,
+            chat_id=user_id, from_chat_id=update.effective_chat.id,
             message_id=update.message.message_id,
         )
         save_admin_reply(update.effective_user.id, user_id, "[media]")
@@ -164,8 +176,7 @@ async def _mark_replied_by_info(context, info: dict) -> None:
 async def _remove_action_buttons(context, chat_id: int, msg_id: int) -> None:
     try:
         await context.bot.edit_message_reply_markup(
-            chat_id=chat_id,
-            message_id=msg_id,
+            chat_id=chat_id, message_id=msg_id,
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("✅ Javob berildi", callback_data="noop")
             ]]),
@@ -188,7 +199,7 @@ async def _do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     context.user_data.pop("waiting_broadcast", None)
     from_chat_id = update.effective_chat.id
     msg_id       = update.message.message_id
-    users  = get_all_active_users()
+    users = get_all_active_users()
     if not users:
         await update.message.reply_text("📭 Aktiv foydalanuvchilar yo'q.")
         return
@@ -215,7 +226,6 @@ async def _do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def _do_save_bc_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Jadval broadcast uchun xabarni saqlaydi, vaqt so'raydi."""
     context.user_data.pop("waiting_bc_message", None)
     context.user_data["bc_message_data"] = {
         "from_chat_id": update.effective_chat.id,
@@ -238,7 +248,7 @@ async def _do_schedule_broadcast(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop("waiting_bc_time", None)
     bc_data = context.user_data.pop("bc_message_data", None)
     if not bc_data:
-        await update.message.reply_text("❌ Xabar ma'lumotlari topilmadi. Qaytadan boshlang.")
+        await update.message.reply_text("❌ Xabar topilmadi. Qaytadan boshlang.")
         return
     try:
         import pytz
@@ -247,9 +257,8 @@ async def _do_schedule_broadcast(update: Update, context: ContextTypes.DEFAULT_T
         dt  = tz.localize(dt)
         now = datetime.now(tz)
         if dt <= now:
-            await update.message.reply_text("❌ Vaqt o'tib ketgan! Kelajak vaqt kiriting.")
-            context.user_data["bc_message_data"] = bc_data
-            context.user_data["waiting_bc_time"]  = True
+            await update.message.reply_text("❌ Vaqt o'tib ketgan!")
+            context.user_data.update({"bc_message_data": bc_data, "waiting_bc_time": True})
             return
         bc_id = save_scheduled_broadcast(
             admin_id=update.effective_user.id,
@@ -265,8 +274,7 @@ async def _do_schedule_broadcast(update: Update, context: ContextTypes.DEFAULT_T
         )
     except ValueError:
         await update.message.reply_text("❌ Format noto'g'ri. Misol: 20.06.2026 14:30")
-        context.user_data["bc_message_data"] = bc_data
-        context.user_data["waiting_bc_time"]  = True
+        context.user_data.update({"bc_message_data": bc_data, "waiting_bc_time": True})
 
 
 def _add_broadcast_job(context, bc_id: int, run_at: datetime, bc_data: dict) -> None:
@@ -274,40 +282,36 @@ def _add_broadcast_job(context, bc_id: int, run_at: datetime, bc_data: dict) -> 
     if not scheduler:
         return
     scheduler.add_job(
-        _run_broadcast_job,
-        "date",
-        run_date=run_at,
+        _run_broadcast_job, "date", run_date=run_at,
         args=[context.bot, bc_id, bc_data["from_chat_id"], bc_data["message_id"]],
-        id=f"bc_{bc_id}",
-        replace_existing=True,
+        id=f"bc_{bc_id}", replace_existing=True,
     )
 
 
 async def _run_broadcast_job(bot, bc_id: int, from_chat_id: int, message_id: int) -> None:
     from database import get_all_active_users, delete_scheduled_broadcast
-    users = get_all_active_users()
-    for uid in users:
+    for uid in get_all_active_users():
         try:
             await bot.copy_message(chat_id=uid, from_chat_id=from_chat_id, message_id=message_id)
         except Exception:
             pass
         await asyncio.sleep(BROADCAST_DELAY)
     delete_scheduled_broadcast(bc_id)
-    logger.info(f"Jadval broadcast #{bc_id} yakunlandi.")
+    logger.info(f"Broadcast #{bc_id} yakunlandi.")
 
 
-# ─── Admin boshqaruv ──────────────────────────────────────────────────────────
+# ─── Admin boshqaruv (ID yoki @username) ─────────────────────────────────────
 
 async def _do_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("waiting_admin_id", None)
-    try:
-        new_id = int(update.message.text.strip())
-        add_admin(new_id)
-        await update.message.reply_text(
-            f"✅ Admin qo'shildi! 🆔 <code>{new_id}</code>", parse_mode="HTML"
-        )
-    except ValueError:
-        await update.message.reply_text("❌ Faqat raqam kiriting.")
+    uid = resolve_user_id(update.message.text.strip())
+    if uid is None:
+        await update.message.reply_text("❌ Foydalanuvchi topilmadi. ID yoki @username kiriting.")
+        return
+    add_admin(uid)
+    await update.message.reply_text(
+        f"✅ Admin qo'shildi! 🆔 <code>{uid}</code>", parse_mode="HTML"
+    )
 
 
 async def _do_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -324,20 +328,19 @@ async def _do_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def _do_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("waiting_user_search", None)
-    query = update.message.text.strip()
+    query   = update.message.text.strip()
     results = search_users(query)
     if not results:
         await update.message.reply_text("🔍 Hech narsa topilmadi.")
         return
     buttons = []
     for u in results[:8]:
-        name = escape(u.get("first_name", "—"))
-        uid  = u["user_id"]
-        badges = ""
-        if u.get("vip"):        badges += "⭐"
-        if u.get("is_blocked"): badges += "🚫"
+        name   = escape(u.get("first_name", "—"))
+        uid    = u["user_id"]
+        uname  = f" @{u['username']}" if u.get("username") else ""
+        badges = ("⭐" if u.get("vip") else "") + ("🚫" if u.get("is_blocked") else "")
         buttons.append([InlineKeyboardButton(
-            f"👤 {name} ({uid}) {badges}",
+            f"👤 {name}{uname} {badges}".strip(),
             callback_data=f"usr_prof_{uid}"
         )])
     buttons.append([InlineKeyboardButton("🔙 Orqaga", callback_data="users")])
@@ -350,14 +353,14 @@ async def _do_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def _do_vip_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("waiting_vip_add", None)
-    try:
-        uid = int(update.message.text.strip())
-        set_vip(uid, True)
-        await update.message.reply_text(
-            f"✅ VIP qo'shildi! 🆔 <code>{uid}</code>", parse_mode="HTML"
-        )
-    except ValueError:
-        await update.message.reply_text("❌ Faqat raqam kiriting.")
+    uid = resolve_user_id(update.message.text.strip())
+    if uid is None:
+        await update.message.reply_text("❌ Foydalanuvchi topilmadi. ID yoki @username kiriting.")
+        return
+    set_vip(uid, True)
+    await update.message.reply_text(
+        f"✅ VIP qo'shildi! 🆔 <code>{uid}</code>", parse_mode="HTML"
+    )
 
 
 async def _do_set_channel_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -400,15 +403,11 @@ def _reschedule_reminder(context) -> None:
         scheduler.remove_job("reminder_job")
     except Exception:
         pass
-    enabled  = get_setting("reminder_enabled") == "true"
-    interval = int(get_setting("reminder_interval") or 2)
-    if enabled:
+    if get_setting("reminder_enabled") == "true":
+        interval = int(get_setting("reminder_interval") or 2)
         scheduler.add_job(
-            _send_reminder,
-            "interval",
-            hours=interval,
-            args=[context.bot],
-            id="reminder_job",
+            _send_reminder, "interval", hours=interval,
+            args=[context.bot], id="reminder_job",
         )
 
 
@@ -429,8 +428,6 @@ async def _send_reminder(bot) -> None:
         except Exception:
             pass
 
-
-# ─── /info – pinlangan xabar ─────────────────────────────────────────────────
 
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     enabled = get_setting("pinned_enabled") == "true"
@@ -453,17 +450,12 @@ async def _handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"get_or_create_user: {e}")
         db_user = None
 
-    # Kanal obuna tekshiruvi
     if not await _check_channel(update, context):
         return
-
-    # Blok tekshiruvi
     if db_user and db_user.get("is_blocked"):
         await update.message.reply_text(get_text("blocked"))
         return
-
-    # Rate limit (VIP o'tkazib yuboradi)
-    if not db_user or not db_user.get("vip"):
+    if not (db_user and db_user.get("vip")):
         try:
             if not _check_rate_limit(user.id, context):
                 await update.message.reply_text(get_text("rate_limit"))
@@ -478,18 +470,14 @@ async def _handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     safe_name  = escape(user.first_name or "")
     uname      = f"@{user.username}" if user.username else "—"
-    safe_uname = escape(uname)
-    safe_text  = escape(text)
     vip_badge  = " ⭐" if db_user and db_user.get("vip") else ""
 
     admin_text = (
         f"👤 <b>{safe_name}</b>{vip_badge}\n"
-        f"🆔 <code>{user.id}</code> · {safe_uname}\n"
+        f"🆔 <code>{user.id}</code> · {escape(uname)}\n"
         f"──────────────────\n"
-        f"💬 {safe_text}"
+        f"💬 {escape(text)}"
     )
-    preview = text[:80]
-
     action_kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("📩 Javob",   callback_data=f"reply_{user.id}"),
         InlineKeyboardButton("👤 Profil",  callback_data=f"usr_prof_{user.id}"),
@@ -502,7 +490,7 @@ async def _handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 admin_id, admin_text, parse_mode="HTML", reply_markup=action_kb
             )
             save_message_map(sent.message_id, admin_id, user.id,
-                             btn_msg_id=sent.message_id, preview=preview)
+                             btn_msg_id=sent.message_id, preview=text[:80])
         except Exception as e:
             logger.error(f"Admin {admin_id}: {e}")
 
@@ -523,7 +511,6 @@ async def _handle_user_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if not await _check_channel(update, context):
         return
-
     if db_user and db_user.get("is_blocked"):
         await update.message.reply_text(get_text("blocked"))
         return
@@ -538,15 +525,14 @@ async def _handle_user_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif msg.document:     mt = "📎 Fayl"
     else:                  mt = "📎 Media"
 
-    safe_name  = escape(user.first_name or "")
-    uname      = f"@{user.username}" if user.username else "—"
-    vip_badge  = " ⭐" if db_user and db_user.get("vip") else ""
+    safe_name = escape(user.first_name or "")
+    uname     = f"@{user.username}" if user.username else "—"
+    vip_badge = " ⭐" if db_user and db_user.get("vip") else ""
 
     header = (
         f"👤 <b>{safe_name}</b>{vip_badge}\n"
         f"🆔 <code>{user.id}</code> · {escape(uname)}\n"
-        f"──────────────────\n"
-        f"{mt}"
+        f"──────────────────\n{mt}"
     )
     action_kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("📩 Javob",   callback_data=f"reply_{user.id}"),
@@ -556,24 +542,18 @@ async def _handle_user_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     for admin_id in get_all_admins():
         try:
-            hdr = await context.bot.send_message(
-                admin_id, header, parse_mode="HTML", reply_markup=action_kb
-            )
-            copied = await context.bot.copy_message(
-                chat_id=admin_id, from_chat_id=msg.chat_id, message_id=msg.message_id
-            )
-            save_message_map(copied.message_id, admin_id, user.id,
-                             btn_msg_id=hdr.message_id, preview=mt)
+            hdr    = await context.bot.send_message(admin_id, header, parse_mode="HTML", reply_markup=action_kb)
+            copied = await context.bot.copy_message(chat_id=admin_id, from_chat_id=msg.chat_id, message_id=msg.message_id)
+            save_message_map(copied.message_id, admin_id, user.id, btn_msg_id=hdr.message_id, preview=mt)
         except Exception as e:
             logger.error(f"Admin {admin_id}: {e}")
 
     await update.message.reply_text(get_text("message_sent"))
 
 
-# ─── Kanal obuna tekshiruvi ───────────────────────────────────────────────────
+# ─── Kanal obuna ─────────────────────────────────────────────────────────────
 
 async def _check_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """True = o'tdi. False = obuna emas (javob yuborildi)."""
     if get_setting("channel_check_enabled") != "true":
         return True
     channel_id = get_setting("channel_id")
@@ -583,11 +563,11 @@ async def _check_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         member = await context.bot.get_chat_member(channel_id, update.effective_user.id)
         if member.status in ("left", "kicked"):
             await update.message.reply_text(
-                f"📢 Botdan foydalanish uchun avval kanalga obuna bo'ling:\n{channel_id}"
+                f"📢 Botdan foydalanish uchun kanalga obuna bo'ling:\n{channel_id}"
             )
             return False
     except Exception as e:
-        logger.error(f"Kanal tekshirish xatosi: {e}")
+        logger.error(f"Kanal tekshirish: {e}")
     return True
 
 
@@ -605,8 +585,7 @@ def _check_rate_limit(user_id: int, context) -> bool:
         reset = datetime.fromisoformat(raw_reset.replace("Z", "+00:00")) if isinstance(raw_reset, str) else raw_reset
     if reset and now > reset:
         update_user(user_id, msg_count=0, rate_reset_at=None)
-        count = 0
-        reset = None
+        count, reset = 0, None
     if reset and count >= RATE_LIMIT:
         return False
     if count == 0 and not reset:
@@ -627,13 +606,7 @@ def _schedule_reset(context, user_id: int, reset_at: datetime) -> None:
         scheduler.remove_job(job_id)
     except Exception:
         pass
-    scheduler.add_job(
-        _send_reset_notification,
-        "date",
-        run_date=reset_at,
-        args=[context.bot, user_id],
-        id=job_id,
-    )
+    scheduler.add_job(_send_reset_notification, "date", run_date=reset_at, args=[context.bot, user_id], id=job_id)
 
 
 async def _send_reset_notification(bot, user_id: int) -> None:
