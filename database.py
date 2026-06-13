@@ -21,6 +21,7 @@ TEXT_LABELS = {
     "blocked":      "🚫 Blok xabari",
     "message_sent": "✅ Yuborildi xabari",
     "rate_reset":   "🔓 Limit tugadi xabari",
+    "help":         "❓ Yordam xabari",
 }
 TEXT_DEFAULTS = {
     "welcome": (
@@ -34,6 +35,15 @@ TEXT_DEFAULTS = {
     "blocked":      "🚫 Siz bloklangansiz. Xabaringiz yetib bormaydi.",
     "message_sent": "✅ Xabaringiz yetkazildi, tez orada javob beriladi 🙂",
     "rate_reset":   "✅ Endi yana yozishingiz mumkin!",
+    "help": (
+        "❓ <b>Yordam</b>\n\n"
+        "Bu bot orqali menga bevosita xabar yuborishingiz mumkin.\n\n"
+        "<b>Buyruqlar:</b>\n"
+        "/start — Botni qayta ishga tushirish\n"
+        "/help — Ushbu yordam xabari (2 ta/kun)\n"
+        "/info — Pinlangan e'lon\n\n"
+        "Xabaringizni yuboring, imkon qadar tez javob beraman 🙂"
+    ),
 }
 
 
@@ -86,6 +96,7 @@ def get_or_create_user(user_id: int, first_name: str, username: str | None = Non
     new = db.table("users").insert({
         "user_id": user_id, "first_name": first_name, "username": username,
         "is_blocked": False, "vip": False, "msg_count": 0, "rate_reset_at": None,
+        "help_count": 0, "help_date": "",
     }).execute()
     return new.data[0] if new.data else None
 
@@ -152,12 +163,9 @@ def get_user_message_count(user_id: int) -> int:
 
 
 def search_users(query: str) -> list[dict]:
-    """ID, ism yoki @username bilan qidirish."""
     try:
         db  = get_db()
         sel = "user_id, first_name, username, is_blocked, vip"
-
-        # 1. Raqam bo'lsa — ID bo'yicha
         try:
             uid = int(query.lstrip("@").strip())
             r   = db.table("users").select(sel).eq("user_id", uid).execute()
@@ -165,26 +173,20 @@ def search_users(query: str) -> list[dict]:
                 return r.data
         except ValueError:
             pass
-
-        # 2. Username va ism bo'yicha (@ belgi olib tashlanadi)
         clean = query.lstrip("@").strip()
         seen, results = set(), []
-
         r_u = db.table("users").select(sel).ilike("username",   f"%{clean}%").limit(10).execute()
         r_n = db.table("users").select(sel).ilike("first_name", f"%{clean}%").limit(10).execute()
-
         for row in (r_u.data or []) + (r_n.data or []):
             if row["user_id"] not in seen:
                 seen.add(row["user_id"])
                 results.append(row)
-
         return results[:10]
     except Exception:
         return []
 
 
 def resolve_user_id(query: str) -> int | None:
-    """ID yoki @username dan user_id qaytaradi. Topilmasa None."""
     q = query.strip()
     try:
         return int(q.lstrip("@"))
@@ -240,6 +242,45 @@ def get_user_growth(days: int = 7) -> list[dict]:
     return [{"date": k, "count": v} for k, v in sorted(counts.items())]
 
 
+# ─── /help kunlik limit ───────────────────────────────────────────────────────
+
+def check_help_limit(user_id: int) -> bool:
+    """True = ruxsat (2 ta/kun limiti to'lmagan). Toshkent vaqti bo'yicha."""
+    import pytz
+    tz    = pytz.timezone("Asia/Tashkent")
+    today = __import__("datetime").datetime.now(tz).date().isoformat()
+    try:
+        db_user = get_user(user_id)
+        if not db_user:
+            return True
+        help_date  = db_user.get("help_date", "") or ""
+        help_count = db_user.get("help_count", 0) or 0
+        if help_date != today:
+            return True          # Yangi kun — reset
+        return help_count < 2   # Kuniga 2 ta
+    except Exception:
+        return True
+
+
+def increment_help_count(user_id: int) -> None:
+    """Toshkent vaqtiga ko'ra bugungi /help sonini oshiradi."""
+    import pytz
+    tz    = pytz.timezone("Asia/Tashkent")
+    today = __import__("datetime").datetime.now(tz).date().isoformat()
+    try:
+        db_user = get_user(user_id)
+        if not db_user:
+            return
+        help_date  = db_user.get("help_date", "") or ""
+        help_count = db_user.get("help_count", 0) or 0
+        if help_date != today:
+            update_user(user_id, help_date=today, help_count=1)
+        else:
+            update_user(user_id, help_count=help_count + 1)
+    except Exception as e:
+        logger.error(f"increment_help_count: {e}")
+
+
 # ─── Xabarlar ─────────────────────────────────────────────────────────────────
 def save_message(user_id: int, text: str) -> None:
     get_db().table("messages").insert({"user_id": user_id, "text": text}).execute()
@@ -290,7 +331,7 @@ def get_pending_messages(admin_chat_id: int) -> list[dict]:
         return []
 
 
-# ─── Admin reply map (xabar tahrirlash uchun) ────────────────────────────────
+# ─── Admin reply map (tahrirlash uchun) ──────────────────────────────────────
 def save_admin_reply_map(admin_msg_id: int, admin_chat_id: int,
                          user_id: int, bot_msg_id: int) -> None:
     try:

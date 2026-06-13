@@ -2,7 +2,7 @@ import os
 import asyncio
 import logging
 from aiohttp import web
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     CallbackQueryHandler, filters,
@@ -12,7 +12,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import BOT_TOKEN
 from start_handler import start_command
 from admin_handler import admin_command, handle_callback
-from message_handler import handle_text, handle_media, handle_edited, info_command
+from message_handler import (
+    handle_text, handle_media, handle_edited,
+    info_command, help_command,
+)
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -26,14 +29,22 @@ MEDIA_FILTER = (
 
 async def global_error_handler(update: object, context) -> None:
     logger.error(f"Xato: {context.error}", exc_info=context.error)
-    if isinstance(update, Update) and update.effective_message:
+    # Faqat oddiy xabarlarga javob ber (edited message ga emas)
+    if isinstance(update, Update) and update.message:
         try:
-            await update.effective_message.reply_text("⚠️ Ichki xato yuz berdi. Iltimos qayta urinib ko'ring.")
+            await update.message.reply_text("⚠️ Ichki xato yuz berdi. Qayta urinib ko'ring.")
         except Exception:
             pass
 
 
 async def post_init(app: Application) -> None:
+    # Bot buyruqlarini menuda ko'rsatish
+    await app.bot.set_my_commands([
+        BotCommand("start", "Botni boshlash"),
+        BotCommand("help",  "Yordam (kuniga 2 ta)"),
+        BotCommand("info",  "Pinlangan e'lon"),
+    ])
+
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.start()
     app.bot_data["scheduler"] = scheduler
@@ -59,9 +70,9 @@ async def _restore_broadcasts(app: Application, scheduler) -> None:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             if dt <= datetime.now(timezone.utc):
-                asyncio.create_task(_run_broadcast_job(
-                    app.bot, bc["id"], bc["from_chat_id"], bc["message_id"]
-                ))
+                asyncio.create_task(
+                    _run_broadcast_job(app.bot, bc["id"], bc["from_chat_id"], bc["message_id"])
+                )
             else:
                 scheduler.add_job(
                     _run_broadcast_job, "date", run_date=dt,
@@ -98,9 +109,13 @@ async def main_async() -> None:
 
     app.add_error_handler(global_error_handler)
 
+    # Buyruqlar
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("info",  info_command))
+    app.add_handler(CommandHandler("help",  help_command))
+
+    # Callback tugmalar
     app.add_handler(CallbackQueryHandler(handle_callback))
 
     # "🛠 Admin panel" tugmasi
@@ -108,13 +123,14 @@ async def main_async() -> None:
         filters.Text(["🛠 Admin panel"]) & ~filters.COMMAND, admin_command
     ))
 
+    # Matn va media
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(MEDIA_FILTER & ~filters.COMMAND, handle_media))
 
     # Admin o'z javobini tahrirlasa — user tomonida ham yangilanadi
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edited))
 
-    # Render uchun web server (port binding)
+    # Render uchun web server
     web_app = web.Application()
     web_app.router.add_get("/", _health)
     port = int(os.environ.get("PORT", 10000))

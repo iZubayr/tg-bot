@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from html import escape
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from config import RATE_LIMIT, RATE_WINDOW, BROADCAST_DELAY
@@ -16,6 +17,7 @@ from database import (
     TEXT_LABELS, set_vip, get_setting,
     update_message_status, save_scheduled_broadcast,
     search_users, get_user_message_count, resolve_user_id,
+    check_help_limit, increment_help_count,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,26 +50,83 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def handle_edited(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Admin o'z javobini tahrir qilsa — user tomonida ham yangilanadi."""
-    if not update.edited_message:
-        return
-    if not is_admin(update.effective_user.id):
-        return
-    msg    = update.edited_message
-    target = get_admin_reply_target(msg.message_id, msg.chat_id)
-    if not target:
-        return
-    new_text = msg.text or msg.caption
-    if not new_text:
-        return
+    """Admin o'z javobini tahrirlasa — user tomonida ham yangilanadi."""
     try:
-        await context.bot.edit_message_text(
-            chat_id=target["user_id"],
-            message_id=target["bot_msg_id"],
-            text=f"📩 Javob:\n\n{new_text}",
-        )
+        if not update.edited_message:
+            return
+        if not is_admin(update.effective_user.id):
+            return
+        msg    = update.edited_message
+        target = get_admin_reply_target(msg.message_id, msg.chat_id)
+        if not target:
+            return
+        new_text = msg.text or msg.caption
+        if not new_text:
+            return
+        try:
+            await context.bot.edit_message_text(
+                chat_id=target["user_id"],
+                message_id=target["bot_msg_id"],
+                text=f"📩 Javob (tahrirlangan):\n\n{new_text}",
+            )
+        except BadRequest as e:
+            err = str(e).lower()
+            if "not modified" not in err and "not found" not in err:
+                logger.error(f"handle_edited edit: {e}")
+        except Exception as e:
+            logger.error(f"handle_edited send: {e}")
     except Exception as e:
         logger.error(f"handle_edited: {e}")
+
+
+# ─── /help buyrug'i ───────────────────────────────────────────────────────────
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Blok va rate limit bo'lsa ham ishlaydi.
+    Kuniga 2 marta (Toshkent vaqti: 00:00–00:00).
+    """
+    user = update.effective_user
+    try:
+        get_or_create_user(user.id, user.first_name, user.username)
+    except Exception:
+        pass
+
+    if not check_help_limit(user.id):
+        await update.message.reply_text(
+            "⚠️ Bugun /help uchun limitingiz tugadi (2 ta/kun).\n"
+            "Ertaga (kechasi 00:00 dan keyin) qayta ishlatish mumkin."
+        )
+        return
+
+    increment_help_count(user.id)
+    await update.message.reply_text(
+        get_text("help"),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+# ─── /info buyrug'i ───────────────────────────────────────────────────────────
+
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pinlangan xabarni yuboradi va user chatida pin qiladi."""
+    enabled = get_setting("pinned_enabled") == "true"
+    text    = get_setting("pinned_text")
+    if not enabled or not text:
+        await update.message.reply_text("📌 Hozircha e'lon yo'q.")
+        return
+    sent = await update.message.reply_text(
+        text, parse_mode="HTML", disable_web_page_preview=True
+    )
+    try:
+        await context.bot.pin_chat_message(
+            chat_id=update.effective_chat.id,
+            message_id=sent.message_id,
+            disable_notification=True,
+        )
+    except Exception as e:
+        logger.warning(f"Pin xatosi (muhim emas): {e}")
 
 
 # ─── Admin text yo'naltiruvchi ────────────────────────────────────────────────
@@ -91,7 +150,7 @@ async def _handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif ud.get("waiting_remind_interval"): await _do_set_remind_interval(update, context)
 
 
-# ─── Admin reply (xabar reply orqali) ────────────────────────────────────────
+# ─── Admin reply ──────────────────────────────────────────────────────────────
 
 async def _forward_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_id = update.message.reply_to_message.message_id
@@ -130,8 +189,6 @@ async def _forward_media_reply(update: Update, context: ContextTypes.DEFAULT_TYP
         await _handle_send_error(update, context, user_id, e)
 
 
-# ─── Admin reply (tugma orqali) ───────────────────────────────────────────────
-
 async def _do_direct_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     info    = context.user_data.pop("replying_to")
     user_id = info["user_id"]
@@ -163,7 +220,9 @@ async def _do_direct_media_reply(update: Update, context: ContextTypes.DEFAULT_T
 
 async def _mark_replied(context, row: dict) -> None:
     update_message_status(row["admin_msg_id"], row["admin_chat_id"], "replied")
-    await _remove_action_buttons(context, row["admin_chat_id"], row.get("btn_msg_id", row["admin_msg_id"]))
+    await _remove_action_buttons(
+        context, row["admin_chat_id"], row.get("btn_msg_id", row["admin_msg_id"])
+    )
 
 
 async def _mark_replied_by_info(context, info: dict) -> None:
@@ -300,7 +359,7 @@ async def _run_broadcast_job(bot, bc_id: int, from_chat_id: int, message_id: int
     logger.info(f"Broadcast #{bc_id} yakunlandi.")
 
 
-# ─── Admin boshqaruv (ID yoki @username) ─────────────────────────────────────
+# ─── Admin boshqaruv ──────────────────────────────────────────────────────────
 
 async def _do_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("waiting_admin_id", None)
@@ -309,13 +368,11 @@ async def _do_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("❌ Foydalanuvchi topilmadi. ID yoki @username kiriting.")
         return
     add_admin(uid)
-    await update.message.reply_text(
-        f"✅ Admin qo'shildi! 🆔 <code>{uid}</code>", parse_mode="HTML"
-    )
+    await update.message.reply_text(f"✅ Admin qo'shildi! 🆔 <code>{uid}</code>", parse_mode="HTML")
 
 
 async def _do_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    key   = context.user_data.pop("waiting_text_edit")
+    key = context.user_data.pop("waiting_text_edit")
     value = update.message.text
     if not value:
         await update.message.reply_text("❌ Faqat matn.")
@@ -340,14 +397,12 @@ async def _do_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         uname  = f" @{u['username']}" if u.get("username") else ""
         badges = ("⭐" if u.get("vip") else "") + ("🚫" if u.get("is_blocked") else "")
         buttons.append([InlineKeyboardButton(
-            f"👤 {name}{uname} {badges}".strip(),
-            callback_data=f"usr_prof_{uid}"
+            f"👤 {name}{uname} {badges}".strip(), callback_data=f"usr_prof_{uid}"
         )])
     buttons.append([InlineKeyboardButton("🔙 Orqaga", callback_data="users")])
     await update.message.reply_text(
         f"🔍 <b>Natijalar</b> ({len(results)} ta):",
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML",
     )
 
 
@@ -358,9 +413,7 @@ async def _do_vip_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("❌ Foydalanuvchi topilmadi. ID yoki @username kiriting.")
         return
     set_vip(uid, True)
-    await update.message.reply_text(
-        f"✅ VIP qo'shildi! 🆔 <code>{uid}</code>", parse_mode="HTML"
-    )
+    await update.message.reply_text(f"✅ VIP qo'shildi! 🆔 <code>{uid}</code>", parse_mode="HTML")
 
 
 async def _do_set_channel_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -369,7 +422,9 @@ async def _do_set_channel_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
     from database import set_setting
     set_setting("channel_id", val)
     await update.message.reply_text(
-        f"✅ Kanal saqlandi: <code>{escape(val)}</code>", parse_mode="HTML"
+        f"✅ Kanal saqlandi: <code>{escape(val)}</code>\n\n"
+        f"<i>Eslatma: Private kanal uchun bot kanalga admin sifatida qo'shilgan bo'lishi kerak!</i>",
+        parse_mode="HTML"
     )
 
 
@@ -429,15 +484,6 @@ async def _send_reminder(bot) -> None:
             pass
 
 
-async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    enabled = get_setting("pinned_enabled") == "true"
-    text    = get_setting("pinned_text")
-    if not enabled or not text:
-        await update.message.reply_text("📌 Hozircha e'lon yo'q.")
-        return
-    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
-
-
 # ─── Foydalanuvchi text xabari ────────────────────────────────────────────────
 
 async def _handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -468,9 +514,9 @@ async def _handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"save_message: {e}")
 
-    safe_name  = escape(user.first_name or "")
-    uname      = f"@{user.username}" if user.username else "—"
-    vip_badge  = " ⭐" if db_user and db_user.get("vip") else ""
+    safe_name = escape(user.first_name or "")
+    uname     = f"@{user.username}" if user.username else "—"
+    vip_badge = " ⭐" if db_user and db_user.get("vip") else ""
 
     admin_text = (
         f"👤 <b>{safe_name}</b>{vip_badge}\n"
@@ -551,24 +597,38 @@ async def _handle_user_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(get_text("message_sent"))
 
 
-# ─── Kanal obuna ─────────────────────────────────────────────────────────────
+# ─── Kanal obuna tekshiruvi ───────────────────────────────────────────────────
 
 async def _check_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if get_setting("channel_check_enabled") != "true":
         return True
-    channel_id = get_setting("channel_id")
+    channel_id = get_setting("channel_id").strip()
     if not channel_id:
         return True
+    user_id = update.effective_user.id
     try:
-        member = await context.bot.get_chat_member(channel_id, update.effective_user.id)
-        if member.status in ("left", "kicked"):
+        member = await context.bot.get_chat_member(channel_id, user_id)
+        if member.status in ("left", "kicked", "banned"):
             await update.message.reply_text(
                 f"📢 Botdan foydalanish uchun kanalga obuna bo'ling:\n{channel_id}"
             )
             return False
+        return True
     except Exception as e:
+        err = str(e).lower()
+        if "forbidden" in err or "not a member" in err:
+            # Bot kanalda emas — private kanal uchun bot admin bo'lishi shart
+            logger.warning(f"Kanal tekshirib bo'lmadi (bot kanalda emas): {channel_id}")
+            await update.message.reply_text(
+                f"📢 Botdan foydalanish uchun kanalga obuna bo'ling:\n{channel_id}"
+            )
+            return False
+        if "chat not found" in err or "invalid" in err:
+            # Noto'g'ri kanal ID — o'tkazib yuboramiz
+            logger.error(f"Kanal topilmadi: {channel_id} — {e}")
+            return True
         logger.error(f"Kanal tekshirish: {e}")
-    return True
+        return True
 
 
 # ─── Rate limit ───────────────────────────────────────────────────────────────
@@ -606,7 +666,10 @@ def _schedule_reset(context, user_id: int, reset_at: datetime) -> None:
         scheduler.remove_job(job_id)
     except Exception:
         pass
-    scheduler.add_job(_send_reset_notification, "date", run_date=reset_at, args=[context.bot, user_id], id=job_id)
+    scheduler.add_job(
+        _send_reset_notification, "date", run_date=reset_at,
+        args=[context.bot, user_id], id=job_id
+    )
 
 
 async def _send_reset_notification(bot, user_id: int) -> None:
