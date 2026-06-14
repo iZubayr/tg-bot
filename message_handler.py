@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from html import escape
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import ChatMember, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
@@ -80,6 +80,30 @@ async def handle_edited(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ─── /help buyrug'i ───────────────────────────────────────────────────────────
+
+async def _broadcast_pinned_to_all(bot, text: str) -> tuple[int, int]:
+    """Pinlangan xabarni barcha active userlarga yuboradi va pin qiladi."""
+    users = get_all_active_users()
+    sent = failed = 0
+    for uid in users:
+        try:
+            msg = await bot.send_message(
+                uid, text, parse_mode="HTML", disable_web_page_preview=True
+            )
+            try:
+                await bot.pin_chat_message(
+                    chat_id=uid, message_id=msg.message_id, disable_notification=True
+                )
+            except Exception:
+                pass
+            sent += 1
+        except Exception as e:
+            failed += 1
+            if "Forbidden" in str(e):
+                mark_blocked(uid)
+        await asyncio.sleep(BROADCAST_DELAY)
+    return sent, failed
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -165,7 +189,7 @@ async def _forward_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
         save_admin_reply(update.effective_user.id, user_id, update.message.text or "")
         save_admin_reply_map(update.message.message_id, chat_id, user_id, sent.message_id)
         await _mark_replied(context, row)
-        await update.message.reply_text("✅ Javob yuborildi.")
+        # Yangi "Yuborildi" xabari yubormaymiz — tugma o'zi yangilanadi
     except Exception as e:
         await _handle_send_error(update, context, user_id, e)
 
@@ -184,7 +208,7 @@ async def _forward_media_reply(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         save_admin_reply(update.effective_user.id, user_id, "[media]")
         await _mark_replied(context, row)
-        await update.message.reply_text("✅ Javob yuborildi.")
+        # Yangi "Yuborildi" xabari yubormaymiz — tugma o'zi yangilanadi
     except Exception as e:
         await _handle_send_error(update, context, user_id, e)
 
@@ -198,7 +222,25 @@ async def _do_direct_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         save_admin_reply(update.effective_user.id, user_id, update.message.text or "")
         save_admin_reply_map(update.message.message_id, chat_id, user_id, sent.message_id)
         await _mark_replied_by_info(context, info)
-        await update.message.reply_text("✅ Javob yuborildi.")
+        # "Javob yozilyapti" xabarini — asl user xabari + status ko'rinishga o'tkazamiz
+        orig_text = info.get("orig_text", "")
+        try:
+            await context.bot.edit_message_text(
+                chat_id=info["chat_id"],
+                message_id=info["msg_id"],
+                text=orig_text + "\n\n✅ <i>Javob berildi</i>",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Javob berildi", callback_data="noop")
+                ]]),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        # Admin yozgan xabarni o'chiramiz (ortiqcha xabar qolmasin)
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
     except Exception as e:
         await _handle_send_error(update, context, user_id, e)
 
@@ -213,7 +255,24 @@ async def _do_direct_media_reply(update: Update, context: ContextTypes.DEFAULT_T
         )
         save_admin_reply(update.effective_user.id, user_id, "[media]")
         await _mark_replied_by_info(context, info)
-        await update.message.reply_text("✅ Javob yuborildi.")
+        # "Javob yozilyapti" xabarini yangilaymiz
+        orig_text = info.get("orig_text", "")
+        try:
+            await context.bot.edit_message_text(
+                chat_id=info["chat_id"],
+                message_id=info["msg_id"],
+                text=orig_text + "\n\n✅ <i>Javob berildi (media)</i>",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Javob berildi", callback_data="noop")
+                ]]),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
     except Exception as e:
         await _handle_send_error(update, context, user_id, e)
 
@@ -348,14 +407,28 @@ def _add_broadcast_job(context, bc_id: int, run_at: datetime, bc_data: dict) -> 
 
 
 async def _run_broadcast_job(bot, bc_id: int, from_chat_id: int, message_id: int) -> None:
-    from database import get_all_active_users, delete_scheduled_broadcast
-    for uid in get_all_active_users():
+    from database import get_all_active_users, delete_scheduled_broadcast, get_all_admins
+    users = get_all_active_users()
+    sent = failed = 0
+    for uid in users:
         try:
             await bot.copy_message(chat_id=uid, from_chat_id=from_chat_id, message_id=message_id)
-        except Exception:
-            pass
+            sent += 1
+        except Exception as e:
+            failed += 1
+            if "Forbidden" in str(e):
+                mark_blocked(uid)
         await asyncio.sleep(BROADCAST_DELAY)
     delete_scheduled_broadcast(bc_id)
+    # Adminlarga xabar berish
+    for admin_id in get_all_admins():
+        try:
+            await bot.send_message(
+                admin_id,
+                f"✅ Jadval broadcast yakunlandi!\n📤 Yuborildi: {sent} ta | ❌ Xato: {failed} ta"
+            )
+        except Exception:
+            pass
     logger.info(f"Broadcast #{bc_id} yakunlandi.")
 
 
@@ -433,7 +506,21 @@ async def _do_set_pinned_text(update: Update, context: ContextTypes.DEFAULT_TYPE
     val = update.message.text or ""
     from database import set_setting
     set_setting("pinned_text", val)
-    await update.message.reply_text("✅ Pinlangan xabar saqlandi!")
+    if get_setting("pinned_enabled") == "true":
+        status = await update.message.reply_text("✅ Saqlandi! Yuborilyapti...")
+        sent, failed = await _broadcast_pinned_to_all(context.bot, val)
+        try:
+            await status.edit_text(
+                f"✅ Pinlangan xabar saqlandi va yuborildi!\n"
+                f"📤 Yuborildi: {sent} ta | ❌ Xato: {failed} ta"
+            )
+        except Exception:
+            pass
+    else:
+        await update.message.reply_text(
+            "✅ Pinlangan xabar saqlandi!\n"
+            "Yuborish uchun sozlamalardan '🟢 Yoqish' ni bosing."
+        )
 
 
 async def _do_set_remind_interval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -608,7 +695,7 @@ async def _check_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.effective_user.id
     try:
         member = await context.bot.get_chat_member(channel_id, user_id)
-        if member.status in ("left", "kicked", "banned"):
+        if member.status in (ChatMember.LEFT, ChatMember.BANNED):
             await update.message.reply_text(
                 f"📢 Botdan foydalanish uchun kanalga obuna bo'ling:\n{channel_id}"
             )
