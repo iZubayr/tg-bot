@@ -432,6 +432,11 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
             from message_handler import _broadcast_pinned_to_all
             asyncio.create_task(_broadcast_pinned_to_all(context.bot, pin_txt))
             await query.message.reply_text("\U0001f4cc Pinlangan xabar barcha userlarga yuborilmoqda...")
+        elif not pin_on:
+            # O'chirilganda — barcha userlardan pin olib tashlanadi
+            from message_handler import _unpin_for_all
+            asyncio.create_task(_unpin_for_all(context.bot))
+            await query.message.reply_text("\U0001f4cc Pin barcha userlardan olib tashlanmoqda...")
 
     elif data == "set_pin_edit":
         context.user_data["waiting_pinned_text"] = True

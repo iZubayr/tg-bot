@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from html import escape
-from telegram import ChatMember, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
@@ -21,6 +21,9 @@ from database import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Obuna hisoblanadigan statuslar (PTB versiyasidan mustaqil)
+_SUBSCRIBED = {"creator", "administrator", "member", "restricted"}
 
 
 # ─── Kirish nuqtalari ─────────────────────────────────────────────────────────
@@ -67,33 +70,28 @@ async def handle_edited(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await context.bot.edit_message_text(
                 chat_id=target["user_id"],
                 message_id=target["bot_msg_id"],
-                text=f"📩 Javob (tahrirlangan):\n\n{new_text}",
+                text=f"\U0001f4e9 Javob (tahrirlangan):\n\n{new_text}",
             )
         except BadRequest as e:
             err = str(e).lower()
             if "not modified" not in err and "not found" not in err:
-                logger.error(f"handle_edited edit: {e}")
+                logger.error(f"handle_edited: {e}")
         except Exception as e:
-            logger.error(f"handle_edited send: {e}")
+            logger.error(f"handle_edited: {e}")
     except Exception as e:
-        logger.error(f"handle_edited: {e}")
+        logger.error(f"handle_edited outer: {e}")
 
 
-# ─── /help buyrug'i ───────────────────────────────────────────────────────────
+# ─── Pinlangan xabar broadcast va unpin ──────────────────────────────────────
 
 async def _broadcast_pinned_to_all(bot, text: str) -> tuple[int, int]:
-    """Pinlangan xabarni barcha active userlarga yuboradi va pin qiladi."""
-    users = get_all_active_users()
+    """Barcha active userlarga pin xabar yuboradi va pin qiladi."""
     sent = failed = 0
-    for uid in users:
+    for uid in get_all_active_users():
         try:
-            msg = await bot.send_message(
-                uid, text, parse_mode="HTML", disable_web_page_preview=True
-            )
+            msg = await bot.send_message(uid, text, parse_mode="HTML", disable_web_page_preview=True)
             try:
-                await bot.pin_chat_message(
-                    chat_id=uid, message_id=msg.message_id, disable_notification=True
-                )
+                await bot.pin_chat_message(chat_id=uid, message_id=msg.message_id, disable_notification=True)
             except Exception:
                 pass
             sent += 1
@@ -105,11 +103,20 @@ async def _broadcast_pinned_to_all(bot, text: str) -> tuple[int, int]:
     return sent, failed
 
 
+async def _unpin_for_all(bot) -> None:
+    """Barcha active userlar chatidan pinni olib tashlaydi."""
+    for uid in get_all_active_users():
+        try:
+            await bot.unpin_all_chat_messages(chat_id=uid)
+        except Exception:
+            pass
+        await asyncio.sleep(BROADCAST_DELAY)
+
+
+# ─── /help buyrug'i ───────────────────────────────────────────────────────────
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Blok va rate limit bo'lsa ham ishlaydi.
-    Kuniga 2 marta (Toshkent vaqti: 00:00–00:00).
-    """
+    """Blok va rate limit bo'lsa ham ishlaydi. Kuniga 2 marta."""
     user = update.effective_user
     try:
         get_or_create_user(user.id, user.first_name, user.username)
@@ -118,31 +125,50 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if not check_help_limit(user.id):
         await update.message.reply_text(
-            "⚠️ Bugun /help uchun limitingiz tugadi (2 ta/kun).\n"
-            "Ertaga (kechasi 00:00 dan keyin) qayta ishlatish mumkin."
+            "\u26a0\ufe0f Bugun /help uchun limitingiz tugadi (2 ta/kun).\n"
+            "Ertaga kechasi 00:00 dan keyin qayta ishlating."
         )
         return
 
     increment_help_count(user.id)
+
+    # Userga yordam matni
     await update.message.reply_text(
-        get_text("help"),
-        parse_mode="HTML",
-        disable_web_page_preview=True,
+        get_text("help"), parse_mode="HTML", disable_web_page_preview=True
     )
+
+    # Admin ga bildirim: kim yordam so'radi
+    safe_name = escape(user.first_name or "")
+    uname     = f"@{user.username}" if user.username else "\u2014"
+    admin_text = (
+        f"\U0001f464 <b>{safe_name}</b>\n"
+        f"\U0001f194 <code>{user.id}</code> \u00b7 {escape(uname)}\n"
+        f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+        f"\U0001f4de Yordam so'rayapti"
+    )
+    action_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("\U0001f4e9 Javob", callback_data=f"reply_{user.id}"),
+    ]])
+    for admin_id in get_all_admins():
+        try:
+            sent = await context.bot.send_message(
+                admin_id, admin_text, parse_mode="HTML", reply_markup=action_kb
+            )
+            save_message_map(sent.message_id, admin_id, user.id,
+                             btn_msg_id=sent.message_id, preview="\U0001f4de Yordam so'radi")
+        except Exception as e:
+            logger.error(f"help admin {admin_id}: {e}")
 
 
 # ─── /info buyrug'i ───────────────────────────────────────────────────────────
 
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Pinlangan xabarni yuboradi va user chatida pin qiladi."""
     enabled = get_setting("pinned_enabled") == "true"
     text    = get_setting("pinned_text")
     if not enabled or not text:
-        await update.message.reply_text("📌 Hozircha e'lon yo'q.")
+        await update.message.reply_text("\U0001f4cc Hozircha e'lon yo'q.")
         return
-    sent = await update.message.reply_text(
-        text, parse_mode="HTML", disable_web_page_preview=True
-    )
+    sent = await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
     try:
         await context.bot.pin_chat_message(
             chat_id=update.effective_chat.id,
@@ -150,7 +176,7 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             disable_notification=True,
         )
     except Exception as e:
-        logger.warning(f"Pin xatosi (muhim emas): {e}")
+        logger.warning(f"Pin xatosi: {e}")
 
 
 # ─── Admin text yo'naltiruvchi ────────────────────────────────────────────────
@@ -181,15 +207,14 @@ async def _forward_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id  = update.effective_chat.id
     row = get_message_map_row(reply_id, chat_id)
     if not row:
-        await update.message.reply_text("❌ Bu xabarning egasi topilmadi.")
+        await update.message.reply_text("\u274c Bu xabarning egasi topilmadi.")
         return
     user_id = row["user_id"]
     try:
-        sent = await context.bot.send_message(user_id, f"📩 Javob:\n\n{update.message.text}")
+        sent = await context.bot.send_message(user_id, f"\U0001f4e9 Javob:\n\n{update.message.text}")
         save_admin_reply(update.effective_user.id, user_id, update.message.text or "")
         save_admin_reply_map(update.message.message_id, chat_id, user_id, sent.message_id)
         await _mark_replied(context, row)
-        # Yangi "Yuborildi" xabari yubormaymiz — tugma o'zi yangilanadi
     except Exception as e:
         await _handle_send_error(update, context, user_id, e)
 
@@ -199,7 +224,7 @@ async def _forward_media_reply(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id  = update.effective_chat.id
     row = get_message_map_row(reply_id, chat_id)
     if not row:
-        await update.message.reply_text("❌ Bu xabarning egasi topilmadi.")
+        await update.message.reply_text("\u274c Bu xabarning egasi topilmadi.")
         return
     user_id = row["user_id"]
     try:
@@ -208,37 +233,33 @@ async def _forward_media_reply(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         save_admin_reply(update.effective_user.id, user_id, "[media]")
         await _mark_replied(context, row)
-        # Yangi "Yuborildi" xabari yubormaymiz — tugma o'zi yangilanadi
     except Exception as e:
         await _handle_send_error(update, context, user_id, e)
 
 
 async def _do_direct_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tugma orqali javob (xabar o'chirilmaydi — tahrirlash imkoniyati saqlanadi)."""
     info    = context.user_data.pop("replying_to")
     user_id = info["user_id"]
     chat_id = update.effective_chat.id
     try:
-        sent = await context.bot.send_message(user_id, f"📩 Javob:\n\n{update.message.text}")
+        sent = await context.bot.send_message(user_id, f"\U0001f4e9 Javob:\n\n{update.message.text}")
         save_admin_reply(update.effective_user.id, user_id, update.message.text or "")
+        # admin_reply_map — keyinchalik tahrirlash uchun
         save_admin_reply_map(update.message.message_id, chat_id, user_id, sent.message_id)
         await _mark_replied_by_info(context, info)
-        # "Javob yozilyapti" xabarini — asl user xabari + status ko'rinishga o'tkazamiz
+        # "Javob yozilyapti" xabarini — status ko'rinishiga o'tkazamiz
         orig_text = info.get("orig_text", "")
         try:
             await context.bot.edit_message_text(
                 chat_id=info["chat_id"],
                 message_id=info["msg_id"],
-                text=orig_text + "\n\n✅ <i>Javob berildi</i>",
+                text=orig_text + "\n\n\u2705 <i>Javob berildi</i>",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✅ Javob berildi", callback_data="noop")
+                    InlineKeyboardButton("\u2705 Javob berildi", callback_data="noop")
                 ]]),
                 parse_mode="HTML",
             )
-        except Exception:
-            pass
-        # Admin yozgan xabarni o'chiramiz (ortiqcha xabar qolmasin)
-        try:
-            await update.message.delete()
         except Exception:
             pass
     except Exception as e:
@@ -246,6 +267,7 @@ async def _do_direct_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def _do_direct_media_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tugma orqali media javob (xabar o'chirilmaydi)."""
     info    = context.user_data.pop("replying_to")
     user_id = info["user_id"]
     try:
@@ -255,22 +277,17 @@ async def _do_direct_media_reply(update: Update, context: ContextTypes.DEFAULT_T
         )
         save_admin_reply(update.effective_user.id, user_id, "[media]")
         await _mark_replied_by_info(context, info)
-        # "Javob yozilyapti" xabarini yangilaymiz
         orig_text = info.get("orig_text", "")
         try:
             await context.bot.edit_message_text(
                 chat_id=info["chat_id"],
                 message_id=info["msg_id"],
-                text=orig_text + "\n\n✅ <i>Javob berildi (media)</i>",
+                text=orig_text + "\n\n\u2705 <i>Javob berildi (media)</i>",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✅ Javob berildi", callback_data="noop")
+                    InlineKeyboardButton("\u2705 Javob berildi", callback_data="noop")
                 ]]),
                 parse_mode="HTML",
             )
-        except Exception:
-            pass
-        try:
-            await update.message.delete()
         except Exception:
             pass
     except Exception as e:
@@ -296,7 +313,7 @@ async def _remove_action_buttons(context, chat_id: int, msg_id: int) -> None:
         await context.bot.edit_message_reply_markup(
             chat_id=chat_id, message_id=msg_id,
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Javob berildi", callback_data="noop")
+                InlineKeyboardButton("\u2705 Javob berildi", callback_data="noop")
             ]]),
         )
     except Exception:
@@ -306,9 +323,9 @@ async def _remove_action_buttons(context, chat_id: int, msg_id: int) -> None:
 async def _handle_send_error(update, context, user_id: int, e: Exception) -> None:
     if "Forbidden" in str(e):
         mark_blocked(user_id)
-        await update.message.reply_text("🚫 Foydalanuvchi botni bloklagan.")
+        await update.message.reply_text("\U0001f6ab Foydalanuvchi botni bloklagan.")
     else:
-        await update.message.reply_text(f"❌ Xato: {e}")
+        await update.message.reply_text(f"\u274c Xato: {e}")
 
 
 # ─── Broadcast ────────────────────────────────────────────────────────────────
@@ -319,11 +336,11 @@ async def _do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     msg_id       = update.message.message_id
     users = get_all_active_users()
     if not users:
-        await update.message.reply_text("📭 Aktiv foydalanuvchilar yo'q.")
+        await update.message.reply_text("\U0001f4ad Aktiv foydalanuvchilar yo'q.")
         return
     sent = failed = 0
     total  = len(users)
-    status = await update.message.reply_text(f"📢 Yuborilmoqda... 0 / {total}")
+    status = await update.message.reply_text(f"\U0001f4e2 Yuborilmoqda... 0 / {total}")
     for i, uid in enumerate(users):
         try:
             await context.bot.copy_message(chat_id=uid, from_chat_id=from_chat_id, message_id=msg_id)
@@ -335,11 +352,11 @@ async def _do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await asyncio.sleep(BROADCAST_DELAY)
         if (i + 1) % 25 == 0:
             try:
-                await status.edit_text(f"📢 Yuborilmoqda... {i + 1} / {total}")
+                await status.edit_text(f"\U0001f4e2 Yuborilmoqda... {i + 1} / {total}")
             except Exception:
                 pass
     await status.edit_text(
-        f"✅ Broadcast yakunlandi!\n\n📤 Yuborildi: {sent}\n❌ Xato/Bloklagan: {failed}"
+        f"\u2705 Broadcast yakunlandi!\n\n\U0001f4e4 Yuborildi: {sent}\n\u274c Xato/Bloklagan: {failed}"
     )
 
 
@@ -351,13 +368,13 @@ async def _do_save_bc_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     }
     context.user_data["waiting_bc_time"] = True
     await update.message.reply_text(
-        "⏰ <b>Qachon yuborilsin?</b>\n\n"
+        "\u23f0 <b>Qachon yuborilsin?</b>\n\n"
         "Format: <code>KK.OO.YYYY SS:DD</code>\n"
         "Misol: <code>20.06.2026 14:30</code>\n\n"
         "<i>Toshkent vaqti (UTC+5)</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔙 Bekor qilish", callback_data="bc_menu")
+            InlineKeyboardButton("\U0001f519 Bekor qilish", callback_data="bc_menu")
         ]]),
     )
 
@@ -366,7 +383,7 @@ async def _do_schedule_broadcast(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop("waiting_bc_time", None)
     bc_data = context.user_data.pop("bc_message_data", None)
     if not bc_data:
-        await update.message.reply_text("❌ Xabar topilmadi. Qaytadan boshlang.")
+        await update.message.reply_text("\u274c Xabar topilmadi. Qaytadan boshlang.")
         return
     try:
         import pytz
@@ -375,7 +392,7 @@ async def _do_schedule_broadcast(update: Update, context: ContextTypes.DEFAULT_T
         dt  = tz.localize(dt)
         now = datetime.now(tz)
         if dt <= now:
-            await update.message.reply_text("❌ Vaqt o'tib ketgan!")
+            await update.message.reply_text("\u274c Vaqt o'tib ketgan!")
             context.user_data.update({"bc_message_data": bc_data, "waiting_bc_time": True})
             return
         bc_id = save_scheduled_broadcast(
@@ -387,11 +404,11 @@ async def _do_schedule_broadcast(update: Update, context: ContextTypes.DEFAULT_T
         if bc_id:
             _add_broadcast_job(context, bc_id, dt.astimezone(timezone.utc), bc_data)
         await update.message.reply_text(
-            f"✅ Jadvalga qo'shildi!\n📅 <code>{dt.strftime('%d.%m.%Y %H:%M')}</code> (Toshkent)",
+            f"\u2705 Jadvalga qo'shildi!\n\U0001f4c5 <code>{dt.strftime('%d.%m.%Y %H:%M')}</code> (Toshkent)",
             parse_mode="HTML",
         )
     except ValueError:
-        await update.message.reply_text("❌ Format noto'g'ri. Misol: 20.06.2026 14:30")
+        await update.message.reply_text("\u274c Format noto'g'ri. Misol: 20.06.2026 14:30")
         context.user_data.update({"bc_message_data": bc_data, "waiting_bc_time": True})
 
 
@@ -420,12 +437,11 @@ async def _run_broadcast_job(bot, bc_id: int, from_chat_id: int, message_id: int
                 mark_blocked(uid)
         await asyncio.sleep(BROADCAST_DELAY)
     delete_scheduled_broadcast(bc_id)
-    # Adminlarga xabar berish
     for admin_id in get_all_admins():
         try:
             await bot.send_message(
                 admin_id,
-                f"✅ Jadval broadcast yakunlandi!\n📤 Yuborildi: {sent} ta | ❌ Xato: {failed} ta"
+                f"\u2705 Jadval broadcast yakunlandi!\n\U0001f4e4 Yuborildi: {sent} ta | \u274c Xato: {failed} ta"
             )
         except Exception:
             pass
@@ -438,22 +454,22 @@ async def _do_add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     context.user_data.pop("waiting_admin_id", None)
     uid = resolve_user_id(update.message.text.strip())
     if uid is None:
-        await update.message.reply_text("❌ Foydalanuvchi topilmadi. ID yoki @username kiriting.")
+        await update.message.reply_text("\u274c Foydalanuvchi topilmadi. ID yoki @username kiriting.")
         return
     add_admin(uid)
-    await update.message.reply_text(f"✅ Admin qo'shildi! 🆔 <code>{uid}</code>", parse_mode="HTML")
+    await update.message.reply_text(f"\u2705 Admin qo'shildi! \U0001f194 <code>{uid}</code>", parse_mode="HTML")
 
 
 async def _do_edit_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = context.user_data.pop("waiting_text_edit")
     value = update.message.text
     if not value:
-        await update.message.reply_text("❌ Faqat matn.")
+        await update.message.reply_text("\u274c Faqat matn.")
         context.user_data["waiting_text_edit"] = key
         return
     set_text(key, value)
     label = TEXT_LABELS.get(key, key)
-    await update.message.reply_text(f"✅ <b>{label}</b> yangilandi!", parse_mode="HTML")
+    await update.message.reply_text(f"\u2705 <b>{label}</b> yangilandi!", parse_mode="HTML")
 
 
 async def _do_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -461,20 +477,20 @@ async def _do_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query   = update.message.text.strip()
     results = search_users(query)
     if not results:
-        await update.message.reply_text("🔍 Hech narsa topilmadi.")
+        await update.message.reply_text("\U0001f50d Hech narsa topilmadi.")
         return
     buttons = []
     for u in results[:8]:
-        name   = escape(u.get("first_name", "—"))
+        name   = escape(u.get("first_name", "\u2014"))
         uid    = u["user_id"]
         uname  = f" @{u['username']}" if u.get("username") else ""
-        badges = ("⭐" if u.get("vip") else "") + ("🚫" if u.get("is_blocked") else "")
+        badges = ("\u2b50" if u.get("vip") else "") + ("\U0001f6ab" if u.get("is_blocked") else "")
         buttons.append([InlineKeyboardButton(
-            f"👤 {name}{uname} {badges}".strip(), callback_data=f"usr_prof_{uid}"
+            f"\U0001f464 {name}{uname} {badges}".strip(), callback_data=f"usr_prof_{uid}"
         )])
-    buttons.append([InlineKeyboardButton("🔙 Orqaga", callback_data="users")])
+    buttons.append([InlineKeyboardButton("\U0001f519 Orqaga", callback_data="users")])
     await update.message.reply_text(
-        f"🔍 <b>Natijalar</b> ({len(results)} ta):",
+        f"\U0001f50d <b>Natijalar</b> ({len(results)} ta):",
         reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML",
     )
 
@@ -483,10 +499,10 @@ async def _do_vip_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     context.user_data.pop("waiting_vip_add", None)
     uid = resolve_user_id(update.message.text.strip())
     if uid is None:
-        await update.message.reply_text("❌ Foydalanuvchi topilmadi. ID yoki @username kiriting.")
+        await update.message.reply_text("\u274c Foydalanuvchi topilmadi.")
         return
     set_vip(uid, True)
-    await update.message.reply_text(f"✅ VIP qo'shildi! 🆔 <code>{uid}</code>", parse_mode="HTML")
+    await update.message.reply_text(f"\u2705 VIP qo'shildi! \U0001f194 <code>{uid}</code>", parse_mode="HTML")
 
 
 async def _do_set_channel_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -495,8 +511,8 @@ async def _do_set_channel_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
     from database import set_setting
     set_setting("channel_id", val)
     await update.message.reply_text(
-        f"✅ Kanal saqlandi: <code>{escape(val)}</code>\n\n"
-        f"<i>Eslatma: Private kanal uchun bot kanalga admin sifatida qo'shilgan bo'lishi kerak!</i>",
+        f"\u2705 Kanal saqlandi: <code>{escape(val)}</code>\n\n"
+        "<i>Private kanal uchun bot kanalga admin sifatida qo'shilgan bo'lishi kerak!</i>",
         parse_mode="HTML"
     )
 
@@ -507,19 +523,19 @@ async def _do_set_pinned_text(update: Update, context: ContextTypes.DEFAULT_TYPE
     from database import set_setting
     set_setting("pinned_text", val)
     if get_setting("pinned_enabled") == "true":
-        status = await update.message.reply_text("✅ Saqlandi! Yuborilyapti...")
+        status = await update.message.reply_text("\u2705 Saqlandi! Yuborilyapti...")
         sent, failed = await _broadcast_pinned_to_all(context.bot, val)
         try:
             await status.edit_text(
-                f"✅ Pinlangan xabar saqlandi va yuborildi!\n"
-                f"📤 Yuborildi: {sent} ta | ❌ Xato: {failed} ta"
+                f"\u2705 Pinlangan xabar saqlandi va yuborildi!\n"
+                f"\U0001f4e4 {sent} ta | \u274c {failed} ta"
             )
         except Exception:
             pass
     else:
         await update.message.reply_text(
-            "✅ Pinlangan xabar saqlandi!\n"
-            "Yuborish uchun sozlamalardan '🟢 Yoqish' ni bosing."
+            "\u2705 Pinlangan xabar saqlandi!\n"
+            "Yuborish uchun sozlamalardan '\U0001f7e2 Yoqish' ni bosing."
         )
 
 
@@ -532,9 +548,9 @@ async def _do_set_remind_interval(update: Update, context: ContextTypes.DEFAULT_
         from database import set_setting
         set_setting("reminder_interval", str(hours))
         _reschedule_reminder(context)
-        await update.message.reply_text(f"✅ Eslatma har {hours} soatda yuboriladi.")
+        await update.message.reply_text(f"\u2705 Eslatma har {hours} soatda yuboriladi.")
     except ValueError:
-        await update.message.reply_text("❌ 1 dan 24 gacha raqam kiriting.")
+        await update.message.reply_text("\u274c 1 dan 24 gacha raqam kiriting.")
 
 
 def _reschedule_reminder(context) -> None:
@@ -559,12 +575,12 @@ async def _send_reminder(bot) -> None:
         rows = get_pending_messages(admin_id)
         if not rows:
             continue
-        lines = [f"⏰ <b>Javobsiz xabarlar: {len(rows)} ta</b>\n"]
+        lines = [f"\u23f0 <b>Javobsiz xabarlar: {len(rows)} ta</b>\n"]
         for row in rows[:5]:
             u    = get_user(row["user_id"])
             name = escape(u["first_name"]) if u else str(row["user_id"])
             prev = row.get("message_preview", "")[:40]
-            lines.append(f"• {name}: <i>{escape(prev)}</i>")
+            lines.append(f"\u2022 {name}: <i>{escape(prev)}</i>")
         try:
             await bot.send_message(admin_id, "\n".join(lines), parse_mode="HTML")
         except Exception:
@@ -602,19 +618,19 @@ async def _handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"save_message: {e}")
 
     safe_name = escape(user.first_name or "")
-    uname     = f"@{user.username}" if user.username else "—"
-    vip_badge = " ⭐" if db_user and db_user.get("vip") else ""
+    uname     = f"@{user.username}" if user.username else "\u2014"
+    vip_badge = " \u2b50" if db_user and db_user.get("vip") else ""
 
     admin_text = (
-        f"👤 <b>{safe_name}</b>{vip_badge}\n"
-        f"🆔 <code>{user.id}</code> · {escape(uname)}\n"
-        f"──────────────────\n"
-        f"💬 {escape(text)}"
+        f"\U0001f464 <b>{safe_name}</b>{vip_badge}\n"
+        f"\U0001f194 <code>{user.id}</code> \u00b7 {escape(uname)}\n"
+        f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+        f"\U0001f4ac {escape(text)}"
     )
     action_kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📩 Javob",   callback_data=f"reply_{user.id}"),
-        InlineKeyboardButton("👤 Profil",  callback_data=f"usr_prof_{user.id}"),
-        InlineKeyboardButton("🚫 Blokla", callback_data=f"block_{user.id}"),
+        InlineKeyboardButton("\U0001f4e9 Javob",   callback_data=f"reply_{user.id}"),
+        InlineKeyboardButton("\U0001f464 Profil",  callback_data=f"usr_prof_{user.id}"),
+        InlineKeyboardButton("\U0001f6ab Blokla", callback_data=f"block_{user.id}"),
     ]])
 
     for admin_id in get_all_admins():
@@ -648,29 +664,29 @@ async def _handle_user_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(get_text("blocked"))
         return
 
-    if   msg.photo:        mt = "📷 Rasm"
-    elif msg.video:        mt = "🎥 Video"
-    elif msg.audio:        mt = "🎵 Audio"
-    elif msg.voice:        mt = "🎙 Ovozli"
-    elif msg.sticker:      mt = "🎭 Stiker"
-    elif msg.animation:    mt = "🎞 GIF"
-    elif msg.video_note:   mt = "⭕ Video xabar"
-    elif msg.document:     mt = "📎 Fayl"
-    else:                  mt = "📎 Media"
+    if   msg.photo:        mt = "\U0001f4f7 Rasm"
+    elif msg.video:        mt = "\U0001f3a5 Video"
+    elif msg.audio:        mt = "\U0001f3b5 Audio"
+    elif msg.voice:        mt = "\U0001f399 Ovozli"
+    elif msg.sticker:      mt = "\U0001f3ad Stiker"
+    elif msg.animation:    mt = "\U0001f39e GIF"
+    elif msg.video_note:   mt = "\u2b55 Video xabar"
+    elif msg.document:     mt = "\U0001f4ce Fayl"
+    else:                  mt = "\U0001f4ce Media"
 
     safe_name = escape(user.first_name or "")
-    uname     = f"@{user.username}" if user.username else "—"
-    vip_badge = " ⭐" if db_user and db_user.get("vip") else ""
+    uname     = f"@{user.username}" if user.username else "\u2014"
+    vip_badge = " \u2b50" if db_user and db_user.get("vip") else ""
 
     header = (
-        f"👤 <b>{safe_name}</b>{vip_badge}\n"
-        f"🆔 <code>{user.id}</code> · {escape(uname)}\n"
-        f"──────────────────\n{mt}"
+        f"\U0001f464 <b>{safe_name}</b>{vip_badge}\n"
+        f"\U0001f194 <code>{user.id}</code> \u00b7 {escape(uname)}\n"
+        f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n{mt}"
     )
     action_kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📩 Javob",   callback_data=f"reply_{user.id}"),
-        InlineKeyboardButton("👤 Profil",  callback_data=f"usr_prof_{user.id}"),
-        InlineKeyboardButton("🚫 Blokla", callback_data=f"block_{user.id}"),
+        InlineKeyboardButton("\U0001f4e9 Javob",   callback_data=f"reply_{user.id}"),
+        InlineKeyboardButton("\U0001f464 Profil",  callback_data=f"usr_prof_{user.id}"),
+        InlineKeyboardButton("\U0001f6ab Blokla", callback_data=f"block_{user.id}"),
     ]])
 
     for admin_id in get_all_admins():
@@ -695,24 +711,23 @@ async def _check_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.effective_user.id
     try:
         member = await context.bot.get_chat_member(channel_id, user_id)
-        if member.status in (ChatMember.LEFT, ChatMember.BANNED):
+        # Faqat haqiqiy a'zolikni tekshiramiz
+        if member.status not in _SUBSCRIBED:
             await update.message.reply_text(
-                f"📢 Botdan foydalanish uchun kanalga obuna bo'ling:\n{channel_id}"
+                f"\U0001f4e2 Botdan foydalanish uchun kanalga obuna bo'ling:\n{channel_id}"
             )
             return False
         return True
     except Exception as e:
         err = str(e).lower()
         if "forbidden" in err or "not a member" in err:
-            # Bot kanalda emas — private kanal uchun bot admin bo'lishi shart
-            logger.warning(f"Kanal tekshirib bo'lmadi (bot kanalda emas): {channel_id}")
+            logger.warning(f"Bot kanalda emas, obuna talab qilinadi: {channel_id}")
             await update.message.reply_text(
-                f"📢 Botdan foydalanish uchun kanalga obuna bo'ling:\n{channel_id}"
+                f"\U0001f4e2 Botdan foydalanish uchun kanalga obuna bo'ling:\n{channel_id}"
             )
             return False
         if "chat not found" in err or "invalid" in err:
-            # Noto'g'ri kanal ID — o'tkazib yuboramiz
-            logger.error(f"Kanal topilmadi: {channel_id} — {e}")
+            logger.error(f"Kanal topilmadi: {channel_id} \u2014 {e}")
             return True
         logger.error(f"Kanal tekshirish: {e}")
         return True
