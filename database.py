@@ -77,13 +77,18 @@ def get_setting(key: str) -> str:
         r = get_db().table("bot_settings").select("value").eq("key", key).execute()
         if r.data:
             return r.data[0]["value"]
-    except Exception:
-        pass
+        logger.warning(f"get_setting: '{key}' DB da topilmadi, default qaytarilyapti")
+    except Exception as e:
+        logger.error(f"get_setting('{key}') XATOSI: {e}")
     return SETTING_DEFAULTS.get(key, "")
 
 
 def set_setting(key: str, value: str) -> None:
-    get_db().table("bot_settings").upsert({"key": key, "value": value}).execute()
+    try:
+        get_db().table("bot_settings").upsert({"key": key, "value": value}).execute()
+        logger.info(f"set_setting: '{key}' = '{value}'")
+    except Exception as e:
+        logger.error(f"set_setting('{key}') XATOSI: {e}")
 
 
 # ─── Users ────────────────────────────────────────────────────────────────────
@@ -392,29 +397,3 @@ def get_admin_added_at(user_id: int) -> str | None:
     except Exception:
         pass
     return None
-
-
-# ─── Jadval broadcast ─────────────────────────────────────────────────────────
-def save_scheduled_broadcast(admin_id: int, from_chat_id: int,
-                              message_id: int, scheduled_at: str) -> int | None:
-    try:
-        r = get_db().table("scheduled_broadcasts").insert({
-            "admin_id": admin_id, "from_chat_id": from_chat_id,
-            "message_id": message_id, "scheduled_at": scheduled_at,
-        }).execute()
-        return r.data[0]["id"] if r.data else None
-    except Exception as e:
-        logger.error(f"save_scheduled_broadcast: {e}")
-        return None
-
-
-def get_pending_broadcasts() -> list[dict]:
-    try:
-        r = get_db().table("scheduled_broadcasts").select("*").order("scheduled_at").execute()
-        return r.data or []
-    except Exception:
-        return []
-
-
-def delete_scheduled_broadcast(bc_id: int) -> None:
-    get_db().table("scheduled_broadcasts").delete().eq("id", bc_id).execute()

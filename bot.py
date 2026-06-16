@@ -49,7 +49,6 @@ async def post_init(app: Application) -> None:
     scheduler.start()
     app.bot_data["scheduler"] = scheduler
     logger.info("✅ APScheduler ishga tushdi.")
-    await _restore_broadcasts(app, scheduler)
     _restore_reminder(app.bot, scheduler)
 
 
@@ -58,29 +57,6 @@ async def post_shutdown(app: Application) -> None:
     if s and s.running:
         s.shutdown()
         logger.info("⛔ APScheduler to'xtatildi.")
-
-
-async def _restore_broadcasts(app: Application, scheduler) -> None:
-    from database import get_pending_broadcasts, delete_scheduled_broadcast
-    from message_handler import _run_broadcast_job
-    from datetime import datetime, timezone
-    for bc in get_pending_broadcasts():
-        try:
-            dt = datetime.fromisoformat(bc["scheduled_at"])
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            if dt <= datetime.now(timezone.utc):
-                asyncio.create_task(
-                    _run_broadcast_job(app.bot, bc["id"], bc["from_chat_id"], bc["message_id"])
-                )
-            else:
-                scheduler.add_job(
-                    _run_broadcast_job, "date", run_date=dt,
-                    args=[app.bot, bc["id"], bc["from_chat_id"], bc["message_id"]],
-                    id=f"bc_{bc['id']}", replace_existing=True,
-                )
-        except Exception as e:
-            logger.error(f"Broadcast restore: {e}")
 
 
 def _restore_reminder(bot, scheduler) -> None:

@@ -15,7 +15,7 @@ from database import (
     is_admin, get_all_admins, get_all_active_users,
     add_admin, mark_blocked, get_text, set_text,
     TEXT_LABELS, set_vip, get_setting,
-    update_message_status, save_scheduled_broadcast,
+    update_message_status,
     search_users, get_user_message_count, resolve_user_id,
     check_help_limit, increment_help_count,
 )
@@ -46,8 +46,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await _do_broadcast(update, context)
         elif context.user_data.get("replying_to"):
             await _do_direct_media_reply(update, context)
-        elif context.user_data.get("waiting_bc_message"):
-            await _do_save_bc_message(update, context)
         return
     await _handle_user_media(update, context)
 
@@ -195,8 +193,6 @@ async def _handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif ud.get("waiting_vip_add"):         await _do_vip_add(update, context)
     elif ud.get("waiting_channel_id"):      await _do_set_channel_id(update, context)
     elif ud.get("waiting_pinned_text"):     await _do_set_pinned_text(update, context)
-    elif ud.get("waiting_bc_message"):      await _do_save_bc_message(update, context)
-    elif ud.get("waiting_bc_time"):         await _do_schedule_broadcast(update, context)
     elif ud.get("waiting_remind_interval"): await _do_set_remind_interval(update, context)
 
 
@@ -359,93 +355,6 @@ async def _do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"\u2705 Broadcast yakunlandi!\n\n\U0001f4e4 Yuborildi: {sent}\n\u274c Xato/Bloklagan: {failed}"
     )
 
-
-async def _do_save_bc_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.pop("waiting_bc_message", None)
-    context.user_data["bc_message_data"] = {
-        "from_chat_id": update.effective_chat.id,
-        "message_id":   update.message.message_id,
-    }
-    context.user_data["waiting_bc_time"] = True
-    await update.message.reply_text(
-        "\u23f0 <b>Qachon yuborilsin?</b>\n\n"
-        "Format: <code>KK.OO.YYYY SS:DD</code>\n"
-        "Misol: <code>20.06.2026 14:30</code>\n\n"
-        "<i>Toshkent vaqti (UTC+5)</i>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("\U0001f519 Bekor qilish", callback_data="bc_menu")
-        ]]),
-    )
-
-
-async def _do_schedule_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.pop("waiting_bc_time", None)
-    bc_data = context.user_data.pop("bc_message_data", None)
-    if not bc_data:
-        await update.message.reply_text("\u274c Xabar topilmadi. Qaytadan boshlang.")
-        return
-    try:
-        import pytz
-        tz  = pytz.timezone("Asia/Tashkent")
-        dt  = datetime.strptime(update.message.text.strip(), "%d.%m.%Y %H:%M")
-        dt  = tz.localize(dt)
-        now = datetime.now(tz)
-        if dt <= now:
-            await update.message.reply_text("\u274c Vaqt o'tib ketgan!")
-            context.user_data.update({"bc_message_data": bc_data, "waiting_bc_time": True})
-            return
-        bc_id = save_scheduled_broadcast(
-            admin_id=update.effective_user.id,
-            from_chat_id=bc_data["from_chat_id"],
-            message_id=bc_data["message_id"],
-            scheduled_at=dt.isoformat(),
-        )
-        if bc_id:
-            _add_broadcast_job(context, bc_id, dt.astimezone(timezone.utc), bc_data)
-        await update.message.reply_text(
-            f"\u2705 Jadvalga qo'shildi!\n\U0001f4c5 <code>{dt.strftime('%d.%m.%Y %H:%M')}</code> (Toshkent)",
-            parse_mode="HTML",
-        )
-    except ValueError:
-        await update.message.reply_text("\u274c Format noto'g'ri. Misol: 20.06.2026 14:30")
-        context.user_data.update({"bc_message_data": bc_data, "waiting_bc_time": True})
-
-
-def _add_broadcast_job(context, bc_id: int, run_at: datetime, bc_data: dict) -> None:
-    scheduler = context.bot_data.get("scheduler")
-    if not scheduler:
-        return
-    scheduler.add_job(
-        _run_broadcast_job, "date", run_date=run_at,
-        args=[context.bot, bc_id, bc_data["from_chat_id"], bc_data["message_id"]],
-        id=f"bc_{bc_id}", replace_existing=True,
-    )
-
-
-async def _run_broadcast_job(bot, bc_id: int, from_chat_id: int, message_id: int) -> None:
-    from database import get_all_active_users, delete_scheduled_broadcast, get_all_admins
-    users = get_all_active_users()
-    sent = failed = 0
-    for uid in users:
-        try:
-            await bot.copy_message(chat_id=uid, from_chat_id=from_chat_id, message_id=message_id)
-            sent += 1
-        except Exception as e:
-            failed += 1
-            if "Forbidden" in str(e):
-                mark_blocked(uid)
-        await asyncio.sleep(BROADCAST_DELAY)
-    delete_scheduled_broadcast(bc_id)
-    for admin_id in get_all_admins():
-        try:
-            await bot.send_message(
-                admin_id,
-                f"\u2705 Jadval broadcast yakunlandi!\n\U0001f4e4 Yuborildi: {sent} ta | \u274c Xato: {failed} ta"
-            )
-        except Exception:
-            pass
-    logger.info(f"Broadcast #{bc_id} yakunlandi.")
 
 
 # ─── Admin boshqaruv ──────────────────────────────────────────────────────────

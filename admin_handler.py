@@ -12,7 +12,7 @@ from database import (
     remove_admin, add_admin, get_user, mark_blocked, unblock_user,
     unblock_all, get_blocked_users, set_vip, get_vip_users,
     get_text, set_text, TEXT_LABELS, get_setting, set_setting,
-    get_pending_messages, get_pending_broadcasts, delete_scheduled_broadcast,
+    get_pending_messages,
     get_user_message_count, update_message_status,
     resolve_user_id,
 )
@@ -24,8 +24,7 @@ def _clear(context) -> None:
     for k in [
         "waiting_broadcast", "waiting_admin_id", "waiting_text_edit",
         "replying_to", "waiting_user_search", "waiting_vip_add",
-        "waiting_channel_id", "waiting_pinned_text", "waiting_bc_message",
-        "waiting_bc_time", "bc_message_data", "waiting_remind_interval",
+        "waiting_channel_id", "waiting_pinned_text", "waiting_remind_interval",
     ]:
         context.user_data.pop(k, None)
 
@@ -78,7 +77,7 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
         _clear(context)
         await _edit(query, "\U0001f6e0 <b>Admin panel</b>", _main_kb(uid))
 
-    # Statistika
+    # ── Statistika ────────────────────────────────────────────────────────────
     elif data == "stats":
         s  = get_stats()
         kb = InlineKeyboardMarkup([
@@ -100,77 +99,17 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
             else:
                 raise
 
-    # Broadcast
+    # ── Broadcast (faqat hozir, jadval olib tashlandi) ───────────────────────
     elif data == "bc_menu":
         _clear(context)
-        bcs  = get_pending_broadcasts()
-        bc_n = f" ({len(bcs)} ta)" if bcs else ""
-        await _edit(query, "\U0001f4e2 <b>Broadcast</b>\n\nQanday yubormoqchisiz?",
-                    InlineKeyboardMarkup([
-                        [InlineKeyboardButton("\U0001f4e4 Hozir",  callback_data="bc_now"),
-                         InlineKeyboardButton("\u23f0 Jadval", callback_data="bc_sched")],
-                        [InlineKeyboardButton(f"\U0001f4cb Jadval ro'yxati{bc_n}", callback_data="bc_list")],
-                        _back(),
-                    ]))
-
-    elif data == "bc_now":
-        _clear(context)
         context.user_data["waiting_broadcast"] = True
-        await _edit(query, "\U0001f4e4 <b>Broadcast</b>\n\nXabarni yuboring (matn, rasm, video, stiker...):",
-                    InlineKeyboardMarkup([_back("bc_menu")]))
+        await _edit(query,
+                    "\U0001f4e2 <b>Broadcast</b>\n\n"
+                    "Barcha userlarga yuboriladigan xabarni yuboring.\n"
+                    "<i>Matn, rasm, video, stiker, GIF \u2014 barchasi qabul qilinadi.</i>",
+                    InlineKeyboardMarkup([_back()]))
 
-    elif data == "bc_sched":
-        _clear(context)
-        context.user_data["waiting_bc_message"] = True
-        await _edit(query, "\u23f0 <b>Jadval broadcast</b>\n\nAvval xabarni yuboring:",
-                    InlineKeyboardMarkup([_back("bc_menu")]))
-
-    elif data == "bc_list":
-        bcs = get_pending_broadcasts()
-        if not bcs:
-            await _edit(query, "\U0001f4cb <b>Jadval ro'yxati</b>\n\nJadvalda xabar yo'q.",
-                        InlineKeyboardMarkup([_back("bc_menu")]))
-            return
-        import pytz
-        tz = pytz.timezone("Asia/Tashkent")
-        buttons = []
-        for bc in bcs[:10]:
-            try:
-                lbl = datetime.fromisoformat(bc["scheduled_at"]).astimezone(tz).strftime("%d.%m %H:%M")
-            except Exception:
-                lbl = bc["scheduled_at"][:16]
-            buttons.append([InlineKeyboardButton(f"\U0001f5d3 {lbl} — \u274c", callback_data=f"bc_del_{bc['id']}")])
-        buttons.append(_back("bc_menu"))
-        await _edit(query, f"\U0001f4cb <b>Jadval ro'yxati</b> ({len(bcs)} ta):", InlineKeyboardMarkup(buttons))
-
-    elif data.startswith("bc_del_"):
-        bc_id = int(data.split("_", 2)[2])
-        delete_scheduled_broadcast(bc_id)
-        sched = context.bot_data.get("scheduler")
-        if sched:
-            try:
-                sched.remove_job(f"bc_{bc_id}")
-            except Exception:
-                pass
-        await query.answer("\u2705 O'chirildi!", show_alert=True)
-        bcs = get_pending_broadcasts()
-        if not bcs:
-            await _edit(query, "\U0001f4cb <b>Jadval ro'yxati</b>\n\nJadvalda xabar yo'q.",
-                        InlineKeyboardMarkup([_back("bc_menu")]))
-        else:
-            import pytz
-            tz = pytz.timezone("Asia/Tashkent")
-            buttons = []
-            for bc in bcs[:10]:
-                try:
-                    lbl = datetime.fromisoformat(bc["scheduled_at"]).astimezone(tz).strftime("%d.%m %H:%M")
-                except Exception:
-                    lbl = bc["scheduled_at"][:16]
-                buttons.append([InlineKeyboardButton(f"\U0001f5d3 {lbl} — \u274c", callback_data=f"bc_del_{bc['id']}")])
-            buttons.append(_back("bc_menu"))
-            await _edit(query, f"\U0001f4cb <b>Jadval ro'yxati</b> ({len(bcs)} ta):", InlineKeyboardMarkup(buttons))
-
-    # Xabarlar
+    # ── Xabarlar ──────────────────────────────────────────────────────────────
     elif data == "msgs":
         _clear(context)
         pending = get_pending_messages(uid)
@@ -233,7 +172,7 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
         await _edit(query, "\u270f\ufe0f <b>Eslatma intervali</b>\n\nNecha soatda bir? (1-24):",
                     InlineKeyboardMarkup([_back("msgs_remind")]))
 
-    # Foydalanuvchilar
+    # ── Foydalanuvchilar ──────────────────────────────────────────────────────
     elif data == "users":
         _clear(context)
         blk = len(get_blocked_users())
@@ -311,7 +250,6 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
         await _show_user_profile(query, context, user_id)
 
     elif data.startswith("prof_back_"):
-        # Profil sahifasidan user xabariga qaytish
         user_id = int(data.split("_", 2)[2])
         ctx = context.user_data.pop(f"prof_ctx_{user_id}", None)
         if ctx and ctx.get("orig_text"):
@@ -331,7 +269,6 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
                 return
             except Exception:
                 pass
-        # Fallback
         blk = len(get_blocked_users())
         vip = len(get_vip_users())
         await _edit(query, "\U0001f465 <b>Foydalanuvchilar</b>",
@@ -357,7 +294,7 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
     elif data.startswith("usr_prof_"):
         await _show_user_profile(query, context, int(data.split("_", 2)[2]))
 
-    # Sozlamalar
+    # ── Sozlamalar ────────────────────────────────────────────────────────────
     elif data == "settings":
         _clear(context)
         chan_on = get_setting("channel_check_enabled") == "true"
@@ -405,7 +342,8 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
         state   = "🟢 Yoqiq" if pin_on else "🔴 O'chiq"
         await _edit(query,
                     f"\U0001f4cc <b>Pinlangan xabar</b>\n\nHolat: {state}\n\n{display}\n\n"
-                    "<i>Yoqilganda barcha userlarga darhol yuboriladi va pin qilinadi.</i>",
+                    "<i>Yoqilganda barcha userlarga yuboriladi va chatda pin qilinadi.\n"
+                    "O'chirilganda esa barcha userlardan pin belgisi olib tashlanadi (xabar o'chirmaydi).</i>",
                     InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔴 O'chirish" if pin_on else "🟢 Yoqish", callback_data="set_pin_tog")],
                         [InlineKeyboardButton("\u270f\ufe0f Matnni o'zgartirish", callback_data="set_pin_edit")],
@@ -433,10 +371,9 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
             asyncio.create_task(_broadcast_pinned_to_all(context.bot, pin_txt))
             await query.message.reply_text("\U0001f4cc Pinlangan xabar barcha userlarga yuborilmoqda...")
         elif not pin_on:
-            # O'chirilganda — barcha userlardan pin olib tashlanadi
             from message_handler import _unpin_for_all
             asyncio.create_task(_unpin_for_all(context.bot))
-            await query.message.reply_text("\U0001f4cc Pin barcha userlardan olib tashlanmoqda...")
+            await query.message.reply_text("\U0001f4cc Pin belgisi barcha userlardan olib tashlanmoqda (xabar o'chirmaydi)...")
 
     elif data == "set_pin_edit":
         context.user_data["waiting_pinned_text"] = True
@@ -445,42 +382,81 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
 
     elif data == "set_chan":
         _clear(context)
-        chan_on = get_setting("channel_check_enabled") == "true"
-        chan_id = get_setting("channel_id") or "<i>O'rnatilmagan</i>"
-        state   = "🟢 Yoqiq" if chan_on else "🔴 O'chiq"
+        chan_on  = get_setting("channel_check_enabled") == "true"
+        chan_id  = get_setting("channel_id") or ""
+        state    = "🟢 Yoqiq" if chan_on else "🔴 O'chiq"
+        chan_disp = f"<code>{chan_id}</code>" if chan_id else "<i>O'rnatilmagan</i>"
         await _edit(query,
-                    f"\U0001f514 <b>Kanal obuna</b>\n\nHolat: {state}\nKanal: <code>{chan_id}</code>\n\n"
-                    "<i>Private kanal uchun bot kanalga admin sifatida qo'shilishi shart!</i>",
+                    f"\U0001f514 <b>Kanal obuna tekshiruvi</b>\n\n"
+                    f"Holat: {state}\n"
+                    f"Kanal: {chan_disp}\n\n"
+                    f"<b>Muhim:</b>\n"
+                    f"1. Bot kanalga <b>admin</b> sifatida qo'shilgan bo'lishi shart\n"
+                    f"2. Public kanal: <code>@username</code>\n"
+                    f"3. Private kanal: raqamli ID (<code>-1001234567890</code>)\n"
+                    f"4. Supabase service_role kaliti to'g'ri bo'lishi shart",
                     InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔴 O'chirish" if chan_on else "🟢 Yoqish", callback_data="set_chan_tog")],
                         [InlineKeyboardButton("\u270f\ufe0f Kanal ID o'rnatish", callback_data="set_chan_id")],
+                        [InlineKeyboardButton("\U0001f9ea Tekshiruv sinovlash", callback_data="set_chan_test")],
                         _back("settings"),
                     ]))
 
     elif data == "set_chan_tog":
         cur = get_setting("channel_check_enabled") == "true"
-        set_setting("channel_check_enabled", "false" if cur else "true")
+        new_val = "false" if cur else "true"
+        set_setting("channel_check_enabled", new_val)
         await query.answer("\u2705 O'zgartirildi!")
-        chan_on = get_setting("channel_check_enabled") == "true"
-        chan_id = get_setting("channel_id") or "<i>O'rnatilmagan</i>"
+        logger.info(f"Kanal obuna {'yoqildi' if new_val == 'true' else 'o\'chirildi'}")
+        chan_on = new_val == "true"
+        chan_id = get_setting("channel_id") or ""
         state   = "🟢 Yoqiq" if chan_on else "🔴 O'chiq"
+        chan_disp = f"<code>{chan_id}</code>" if chan_id else "<i>O'rnatilmagan</i>"
         await _edit(query,
-                    f"\U0001f514 <b>Kanal obuna</b>\n\nHolat: {state}\nKanal: <code>{chan_id}</code>",
+                    f"\U0001f514 <b>Kanal obuna</b>\n\nHolat: {state}\nKanal: {chan_disp}",
                     InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔴 O'chirish" if chan_on else "🟢 Yoqish", callback_data="set_chan_tog")],
                         [InlineKeyboardButton("\u270f\ufe0f Kanal ID o'rnatish", callback_data="set_chan_id")],
+                        [InlineKeyboardButton("\U0001f9ea Tekshiruv sinovlash", callback_data="set_chan_test")],
                         _back("settings"),
                     ]))
 
     elif data == "set_chan_id":
         context.user_data["waiting_channel_id"] = True
         await _edit(query,
-                    "\u270f\ufe0f <b>Kanal ID</b>\n\nPublic: <code>@channelname</code>\n"
+                    "\u270f\ufe0f <b>Kanal ID</b>\n\n"
+                    "Public: <code>@channelname</code>\n"
                     "Private: <code>-1001234567890</code>\n\n"
-                    "<i>Private kanal uchun botni avval kanalga admin qiling!</i>",
+                    "<b>Botni kanalga admin qilish:</b>\n"
+                    "Kanal > Boshqarish > Adminlar > Bot qo'shish",
                     InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f519 Bekor qilish", callback_data="set_chan")]]))
 
-    # Adminlar (faqat ega)
+    elif data == "set_chan_test":
+        # Kanal tekshiruvini o'zingizda sinab ko'ring
+        chan_id = get_setting("channel_id").strip()
+        if not chan_id:
+            await query.answer("\u274c Avval kanal ID o'rnating!", show_alert=True)
+            return
+        try:
+            member = await context.bot.get_chat_member(chan_id, uid)
+            await query.message.reply_text(
+                f"\u2705 <b>Kanal ulanishi ishlayapti!</b>\n\n"
+                f"Kanal: <code>{chan_id}</code>\n"
+                f"Sizning statusingiz: <code>{member.status}</code>",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await query.message.reply_text(
+                f"\u274c <b>Kanal tekshirish xatosi:</b>\n\n"
+                f"<code>{escape(str(e))}</code>\n\n"
+                f"<b>Mumkin bo'lgan sabablar:</b>\n"
+                f"1. Bot kanalga admin sifatida qo'shilmagan\n"
+                f"2. Kanal ID noto'g'ri\n"
+                f"3. Supabase ulanishi ishlamayapti",
+                parse_mode="HTML"
+            )
+
+    # ── Adminlar (faqat ega) ──────────────────────────────────────────────────
     elif data == "admins":
         if uid != MAIN_ADMIN_ID:
             await query.answer("\u274c Faqat bot egasi uchun!", show_alert=True)
@@ -529,7 +505,7 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer("\u2705 Admin o'chirildi!", show_alert=True)
         await _edit(query, "\U0001f451 <b>Adminlar ro'yxati</b>", _admins_kb())
 
-    # Xabar tugmalari
+    # ── Xabar tugmalari ───────────────────────────────────────────────────────
     elif data.startswith("block_"):
         user_id = int(data.split("_", 1)[1])
         if is_admin(user_id):
@@ -592,7 +568,7 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("\u274c Javob bekor qilindi.")
 
 
-# Yordamchi funksiyalar
+# ─── Yordamchi funksiyalar ────────────────────────────────────────────────────
 
 async def _show_user_profile(query, context, user_id: int) -> None:
     u = get_user(user_id)
@@ -616,7 +592,6 @@ async def _show_user_profile(query, context, user_id: int) -> None:
         f"\U0001f6ab Holat: {'Bloklangan' if is_blk else 'Faol'}"
     )
 
-    # Qayerdan kelgani: user xabari yoki panel
     from_user_msg = False
     if query.message.reply_markup:
         for row in query.message.reply_markup.inline_keyboard:
