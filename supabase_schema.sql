@@ -103,7 +103,9 @@ INSERT INTO bot_settings (key, value) VALUES
     ('channel_check_enabled', 'false'),
     ('channel_id',            ''),
     ('pinned_enabled',        'false'),
-    ('pinned_text',           '')
+    ('pinned_text',           ''),
+    ('rate_limit_count',      '5'),
+    ('help_limit_count',      '2')
 ON CONFLICT (key) DO NOTHING;
 
 -- ─── 9. Jadval broadcast ───────────────────────────────────────────────────

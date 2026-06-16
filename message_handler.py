@@ -6,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from config import RATE_LIMIT, RATE_WINDOW, BROADCAST_DELAY
+from config import RATE_WINDOW, BROADCAST_DELAY
 from database import (
     get_or_create_user, get_user, update_user,
     save_message, save_admin_reply,
@@ -114,16 +114,22 @@ async def _unpin_for_all(bot) -> None:
 # ─── /help buyrug'i ───────────────────────────────────────────────────────────
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Blok va rate limit bo'lsa ham ishlaydi. Kuniga 2 marta."""
+    """Blok va rate limit bo'lsa ham ishlaydi. Admin belgilagan kunlik limit."""
     user = update.effective_user
     try:
         get_or_create_user(user.id, user.first_name, user.username)
     except Exception:
         pass
 
+    limit = int(get_setting("help_limit_count") or 2)
+
+    if limit <= 0:
+        await update.message.reply_text("\U0001f6ab /help buyrug'i hozircha cheklangan.")
+        return
+
     if not check_help_limit(user.id):
         await update.message.reply_text(
-            "\u26a0\ufe0f Bugun /help uchun limitingiz tugadi (2 ta/kun).\n"
+            f"\u26a0\ufe0f Bugun /help uchun limitingiz tugadi ({limit} ta/kun).\n"
             "Ertaga kechasi 00:00 dan keyin qayta ishlating."
         )
         return
@@ -194,6 +200,8 @@ async def _handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif ud.get("waiting_channel_id"):      await _do_set_channel_id(update, context)
     elif ud.get("waiting_pinned_text"):     await _do_set_pinned_text(update, context)
     elif ud.get("waiting_remind_interval"): await _do_set_remind_interval(update, context)
+    elif ud.get("waiting_rate_limit"):      await _do_set_rate_limit(update, context)
+    elif ud.get("waiting_help_limit"):      await _do_set_help_limit(update, context)
 
 
 # ─── Admin reply ──────────────────────────────────────────────────────────────
@@ -478,6 +486,44 @@ def _reschedule_reminder(context) -> None:
         )
 
 
+async def _do_set_rate_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("waiting_rate_limit", None)
+    try:
+        count = int(update.message.text.strip())
+        if count < 0:
+            raise ValueError
+        from database import set_setting
+        set_setting("rate_limit_count", str(count))
+        await update.message.reply_text(
+            f"\u2705 Rate limit yangilandi: soatiga <b>{count}</b> ta xabar.",
+            parse_mode="HTML"
+        )
+    except ValueError:
+        await update.message.reply_text("\u274c 0 yoki musbat raqam kiriting.")
+
+
+async def _do_set_help_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("waiting_help_limit", None)
+    try:
+        count = int(update.message.text.strip())
+        if count < 0:
+            raise ValueError
+        from database import set_setting
+        set_setting("help_limit_count", str(count))
+        if count == 0:
+            await update.message.reply_text(
+                "\u2705 /help limiti <b>0</b> ga o'rnatildi \u2014 endi butunlay cheklangan.",
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text(
+                f"\u2705 /help limiti yangilandi: kuniga <b>{count}</b> ta.",
+                parse_mode="HTML"
+            )
+    except ValueError:
+        await update.message.reply_text("\u274c 0 yoki musbat raqam kiriting.")
+
+
 async def _send_reminder(bot) -> None:
     from database import get_all_admins, get_pending_messages, get_user
     for admin_id in get_all_admins():
@@ -648,6 +694,7 @@ def _check_rate_limit(user_id: int, context) -> bool:
     db_user = get_user(user_id)
     if not db_user:
         return True
+    limit     = int(get_setting("rate_limit_count") or 5)
     count     = db_user.get("msg_count", 0)
     raw_reset = db_user.get("rate_reset_at")
     now       = datetime.now(timezone.utc)
@@ -657,7 +704,7 @@ def _check_rate_limit(user_id: int, context) -> bool:
     if reset and now > reset:
         update_user(user_id, msg_count=0, rate_reset_at=None)
         count, reset = 0, None
-    if reset and count >= RATE_LIMIT:
+    if reset and count >= limit:
         return False
     if count == 0 and not reset:
         new_reset = now + timedelta(seconds=RATE_WINDOW)

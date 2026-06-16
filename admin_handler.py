@@ -25,6 +25,7 @@ def _clear(context) -> None:
         "waiting_broadcast", "waiting_admin_id", "waiting_text_edit",
         "replying_to", "waiting_user_search", "waiting_vip_add",
         "waiting_channel_id", "waiting_pinned_text", "waiting_remind_interval",
+        "waiting_rate_limit", "waiting_help_limit",
     ]:
         context.user_data.pop(k, None)
 
@@ -303,6 +304,8 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
                         [InlineKeyboardButton("\U0001f4dd Matnlar", callback_data="texts")],
                         [InlineKeyboardButton("\U0001f4cc Pinlangan xabar", callback_data="set_pin")],
                         [InlineKeyboardButton(f"{'🟢' if chan_on else '🔴'} Kanal obuna", callback_data="set_chan")],
+                        [InlineKeyboardButton("\U0001f6a6 Rate limit", callback_data="set_ratelimit")],
+                        [InlineKeyboardButton("\u2753 /help limiti", callback_data="set_helplimit")],
                         _back(),
                     ]))
 
@@ -455,6 +458,47 @@ async def _handle_callback_inner(update: Update, context: ContextTypes.DEFAULT_T
                 f"3. Supabase ulanishi ishlamayapti",
                 parse_mode="HTML"
             )
+
+    # ── Rate limit ───────────────────────────────────────────────────
+    elif data == "set_ratelimit":
+        _clear(context)
+        cur = get_setting("rate_limit_count") or "5"
+        await _edit(query,
+                    f"\U0001f6a6 <b>Rate limit</b>\n\n"
+                    f"Hozirgi: soatiga <b>{cur}</b> ta xabar\n\n"
+                    f"<i>0 qilib qo'ysangiz \u2014 oddiy userlar xabar yubora olmaydi.\n"
+                    f"VIP userlar bu limitdan mustasno.</i>",
+                    InlineKeyboardMarkup([
+                        [InlineKeyboardButton("\u270f\ufe0f O'zgartirish", callback_data="set_ratelimit_edit")],
+                        _back("settings"),
+                    ]))
+
+    elif data == "set_ratelimit_edit":
+        context.user_data["waiting_rate_limit"] = True
+        await _edit(query,
+                    "\u270f\ufe0f <b>Rate limit</b>\n\n"
+                    "Soatiga nechta xabar ruxsat etilsin? (0 \u2014 butunlay taqiq)",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f519 Bekor qilish", callback_data="set_ratelimit")]]))
+
+    # ── /help limiti ────────────────────────────────────────────────
+    elif data == "set_helplimit":
+        _clear(context)
+        cur = get_setting("help_limit_count") or "2"
+        await _edit(query,
+                    f"\u2753 <b>/help limiti</b>\n\n"
+                    f"Hozirgi: kuniga <b>{cur}</b> ta\n\n"
+                    f"<i>0 qilib qo'ysangiz \u2014 /help buyrug'i butunlay cheklanadi.</i>",
+                    InlineKeyboardMarkup([
+                        [InlineKeyboardButton("\u270f\ufe0f O'zgartirish", callback_data="set_helplimit_edit")],
+                        _back("settings"),
+                    ]))
+
+    elif data == "set_helplimit_edit":
+        context.user_data["waiting_help_limit"] = True
+        await _edit(query,
+                    "\u270f\ufe0f <b>/help limiti</b>\n\n"
+                    "Kuniga nechta /help ruxsat etilsin? (0 \u2014 butunlay taqiq)",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f519 Bekor qilish", callback_data="set_helplimit")]]))
 
     # ── Adminlar (faqat ega) ──────────────────────────────────────────────────
     elif data == "admins":

@@ -69,6 +69,8 @@ SETTING_DEFAULTS = {
     "channel_id":            "",
     "pinned_enabled":        "false",
     "pinned_text":           "",
+    "rate_limit_count":      "5",
+    "help_limit_count":      "2",
 }
 
 
@@ -250,7 +252,11 @@ def get_user_growth(days: int = 7) -> list[dict]:
 # ─── /help kunlik limit ───────────────────────────────────────────────────────
 
 def check_help_limit(user_id: int) -> bool:
-    """True = ruxsat (2 ta/kun limiti to'lmagan). Toshkent vaqti bo'yicha."""
+    """True = ruxsat. Admin belgilagan kunlik limitga asoslanadi (Toshkent vaqti).
+    Limit 0 bo'lsa — har doim False (butunlay cheklangan)."""
+    limit = int(get_setting("help_limit_count") or 2)
+    if limit <= 0:
+        return False
     import pytz
     tz    = pytz.timezone("Asia/Tashkent")
     today = __import__("datetime").datetime.now(tz).date().isoformat()
@@ -262,7 +268,7 @@ def check_help_limit(user_id: int) -> bool:
         help_count = db_user.get("help_count", 0) or 0
         if help_date != today:
             return True          # Yangi kun — reset
-        return help_count < 2   # Kuniga 2 ta
+        return help_count < limit
     except Exception:
         return True
 
