@@ -31,7 +31,6 @@ Ushbu bot foydalanuvchilar va ma'murlar (adminlar) o'rtasida ishonchli va xavfsi
   * **Kunlik /help limiti:** Foydalanuvchilar uchun `/help` limitini o'zgartirish.
   * **Asosiy Admin huquqlari (Owner):** Faqat asosiy bot egasigina boshqa adminlarni qo'shishi yoki o'chirishi mumkin.
 * **Broadcast (Ommaviy xabar):** Barcha foydalanuvchilarga matn, rasm, video yoki boshqa mediani bir vaqtda tarqatish.
-* **Tahrirlash sinxronizatsiyasi:** Admin foydalanuvchiga yuborgan javob xabarini Telegram'da tahrirlasa, foydalanuvchiga borgan xabar ham avtomatik ravishda tahrirlanadi.
 
 ---
 
@@ -114,7 +113,6 @@ Deploy qilingandan so'ng, platforma `aiohttp` orqali yaratilgan `http://0.0.0.0:
 * **`admin_reply_map`** — Adminlar javobini tahrirlaganda, foydalanuvchi tomonida ham tahrirlanishini ta'minlovchi xabarlar xaritasi.
 * **`bot_texts`** — Botning barcha tizimli matnlari (Welcome, Rate Limit xabari va hk).
 * **`bot_settings`** — Tizim sozlamalari (Eslatma holati, kanal ID, rate-limit cheklov miqdori).
-* **`scheduled_broadcasts`** — Rejalashtirilgan ommaviy xabarlar ro'yxati.
 
 ---
 
