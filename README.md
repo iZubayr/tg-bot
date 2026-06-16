@@ -114,7 +114,6 @@ Deploy qilingandan so'ng, platforma `aiohttp` orqali yaratilgan `http://0.0.0.0:
 * **`admin_reply_map`** — Adminlar javobini tahrirlaganda, foydalanuvchi tomonida ham tahrirlanishini ta'minlovchi xabarlar xaritasi.
 * **`bot_texts`** — Botning barcha tizimli matnlari (Welcome, Rate Limit xabari va hk).
 * **`bot_settings`** — Tizim sozlamalari (Eslatma holati, kanal ID, rate-limit cheklov miqdori).
-* **`scheduled_broadcasts`** — Rejalashtirilgan ommaviy xabarlar ro'yxati.
 
 ---
 

@@ -108,15 +108,8 @@ INSERT INTO bot_settings (key, value) VALUES
     ('help_limit_count',      '2')
 ON CONFLICT (key) DO NOTHING;
 
--- ─── 9. Jadval broadcast ───────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS scheduled_broadcasts (
-    id           SERIAL PRIMARY KEY,
-    admin_id     BIGINT NOT NULL,
-    from_chat_id BIGINT NOT NULL,
-    message_id   BIGINT NOT NULL,
-    scheduled_at TIMESTAMPTZ NOT NULL,
-    created_at   TIMESTAMPTZ DEFAULT NOW()
-);
+-- ─── 9. Jadval broadcast o'chirildi (keraksiz jadval) ───────────────────────
+DROP TABLE IF EXISTS scheduled_broadcasts CASCADE;
 
 -- ─── RLS o'chirish ─────────────────────────────────────────────────────────
 ALTER TABLE users                DISABLE ROW LEVEL SECURITY;
@@ -127,4 +120,3 @@ ALTER TABLE message_map          DISABLE ROW LEVEL SECURITY;
 ALTER TABLE admin_reply_map      DISABLE ROW LEVEL SECURITY;
 ALTER TABLE bot_texts            DISABLE ROW LEVEL SECURITY;
 ALTER TABLE bot_settings         DISABLE ROW LEVEL SECURITY;
-ALTER TABLE scheduled_broadcasts DISABLE ROW LEVEL SECURITY;
