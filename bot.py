@@ -50,7 +50,6 @@ async def post_init(app: Application) -> None:
     app.bot_data["scheduler"] = scheduler
     logger.info("✅ APScheduler ishga tushdi.")
     _restore_reminder(app.bot, scheduler)
-    _restore_rate_resets(app.bot, scheduler)
 
 
 async def post_shutdown(app: Application) -> None:
@@ -70,35 +69,6 @@ def _restore_reminder(bot, scheduler) -> None:
             args=[bot], id="reminder_job", replace_existing=True,
         )
 
-
-def _restore_rate_resets(bot, scheduler) -> None:
-    """Bot restart bo'lganda DB'dan hali kutayotgan rate reset joblarini qayta tiklaydi."""
-    from datetime import datetime, timezone
-    from database import get_all_active_users, get_user
-    from message_handler import _send_reset_notification
-
-    now = datetime.now(timezone.utc)
-    for uid in get_all_active_users():
-        try:
-            u = get_user(uid)
-            if not u:
-                continue
-            raw_reset = u.get("rate_reset_at")
-            if not raw_reset:
-                continue
-            reset = datetime.fromisoformat(raw_reset.replace("Z", "+00:00")) if isinstance(raw_reset, str) else raw_reset
-            if reset <= now:
-                # Vaqt allaqachon o'tgan — tozalaymiz, notifikatsiya yubormaymiz
-                # (keyingi xabar yozganda _check_rate_limit o'zi tozalaydi)
-                continue
-            job_id = f"rate_reset_{uid}"
-            scheduler.add_job(
-                _send_reset_notification, "date", run_date=reset,
-                args=[bot, uid], id=job_id, replace_existing=True,
-            )
-            logger.info(f"Rate reset job tiklandi: user={uid}, vaqt={reset}")
-        except Exception as e:
-            logger.warning(f"_restore_rate_resets user={uid}: {e}")
 
 
 async def _health(request):

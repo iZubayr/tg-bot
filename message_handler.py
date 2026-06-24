@@ -726,26 +726,6 @@ def _check_rate_limit(user_id: int, context) -> bool:
     if not reset:
         new_reset = now + timedelta(seconds=RATE_WINDOW)
         update_user(user_id, msg_count=1, rate_reset_at=new_reset.isoformat())
-        _schedule_reset(context, user_id, new_reset)
     else:
         update_user(user_id, msg_count=count + 1)
     return True
-
-
-def _schedule_reset(context, user_id: int, reset_at: datetime) -> None:
-    scheduler = context.bot_data.get("scheduler")
-    if not scheduler:
-        return
-    job_id = f"rate_reset_{user_id}"
-    try:
-        scheduler.remove_job(job_id)
-    except Exception:
-        pass
-    scheduler.add_job(
-        _send_reset_notification, "date", run_date=reset_at,
-        args=[context.bot, user_id], id=job_id
-    )
-
-
-async def _send_reset_notification(bot, user_id: int) -> None:
-    pass
