@@ -20,7 +20,6 @@ TEXT_LABELS = {
     "rate_limit":   "⏰ Limit xabari",
     "blocked":      "🚫 Blok xabari",
     "message_sent": "✅ Yuborildi xabari",
-    "rate_reset":   "🔓 Limit tugadi xabari",
     "help":         "❓ Yordam xabari",
 }
 TEXT_DEFAULTS = {
