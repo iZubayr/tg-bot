@@ -748,7 +748,4 @@ def _schedule_reset(context, user_id: int, reset_at: datetime) -> None:
 
 
 async def _send_reset_notification(bot, user_id: int) -> None:
-    try:
-        await bot.send_message(user_id, get_text("rate_reset"))
-    except Exception:
-        pass
+    pass
