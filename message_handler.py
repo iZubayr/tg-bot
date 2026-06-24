@@ -723,7 +723,7 @@ def _check_rate_limit(user_id: int, context) -> bool:
         count, reset = 0, None
     if reset and count >= limit:
         return False
-    if count == 0 and not reset:
+    if not reset:
         new_reset = now + timedelta(seconds=RATE_WINDOW)
         update_user(user_id, msg_count=1, rate_reset_at=new_reset.isoformat())
         _schedule_reset(context, user_id, new_reset)
