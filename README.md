@@ -10,7 +10,8 @@ Ushbu bot foydalanuvchilar va ma'murlar (adminlar) o'rtasida ishonchli va xavfsi
 * **Har xil turdagi xabarlar:** Bot orqali matn, rasm, video, audio, ovozli xabar (voice), video xabar (round video), stiker, GIF va fayllarni adminlarga yuborish imkoniyati.
 * **Xabarlarni tahrirlash:** Foydalanuvchi yuborgan xabarini tahrirlasa, u admin panelda ham tahrirlangan shaklda ko'rinadi.
 * **Kanalga a'zolik majburiyati (OP - Required Subscription):** Admin tomonidan yoqilgan bo'lsa, foydalanuvchi ma'lum bir kanalga a'zo bo'lmaguncha botdan foydalana olmaydi.
-* **Rate Limit (Cheklovlar):** Botdan haddan tashqari ko'p foydalanishni va spamni oldini olish maqsadida soatlik xabar yuborish limiti (sozlanuvchan).
+* **Rate Limit (Cheklovlar):** Botdan haddan tashqari ko'p foydalanishni va spamni oldini olish maqsadida soatlik xabar yuborish limiti (sozlanuvchan). Cheklovga tushgan foydalanuvchiga taqiq qachon tugashini aniq vaqt ko'rsatkichlarida (masalan, "X soat Y daqiqa") ko'rsatib boradi.
+* **Rate Reset avtomatik tiklanishi:** Bot restart bo'lganda ham foydalanuvchilarning rate limit cheklovidan chiqish vaqti (APScheduler job) bazadagi ma'lumotlar asosida avtomatik ravishedan qayta tiklanadi.
 * **Dinamik /help limiti:** Kunlik `/help` buyrug'idan foydalanish limiti.
 * **Pinlangan e'lon:** `/info` buyrug'i orqali adminlar tomonidan barcha foydalanuvchilarga yuborilgan va pin qilingan e'lonni ko'rish.
 
