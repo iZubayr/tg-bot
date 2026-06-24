@@ -562,7 +562,24 @@ async def _handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if not (db_user and db_user.get("vip")):
         try:
             if not _check_rate_limit(user.id, context):
-                await update.message.reply_text(get_text("rate_limit"))
+                from database import get_user as _gu
+                _u = _gu(user.id)
+                _raw = _u.get("rate_reset_at") if _u else None
+                if _raw:
+                    from datetime import datetime, timezone
+                    _reset = datetime.fromisoformat(_raw.replace("Z", "+00:00")) if isinstance(_raw, str) else _raw
+                    _now = datetime.now(timezone.utc)
+                    _diff = int((_reset - _now).total_seconds() / 60)
+                    _h, _m = divmod(max(_diff, 0), 60)
+                    if _h:
+                        _time_str = f"{_h} soat {_m} daqiqa"
+                    else:
+                        _time_str = f"{_m} daqiqa"
+                    await update.message.reply_text(
+                        f"⚠️ Xabar limitiga yetdingiz.\n⏰ {_time_str}dan so'ng qayta yuboring."
+                    )
+                else:
+                    await update.message.reply_text(get_text("rate_limit"))
                 return
         except Exception as e:
             logger.error(f"rate_limit: {e}")
